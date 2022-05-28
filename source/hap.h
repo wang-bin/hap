@@ -28,6 +28,8 @@
 #ifndef hap_h
 #define hap_h
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -65,6 +67,7 @@ enum HapResult {
  */
 typedef void (*HapDecodeWorkFunction)(void *p, unsigned int index);
 typedef void (*HapDecodeCallback)(HapDecodeWorkFunction function, void *p, unsigned int count, void *info);
+typedef void* (*HapAlloc)(size_t size);
 
 /*
  Returns the maximum size of an output buffer for a frame composed of one or more textures, or returns 0 on error.
@@ -136,6 +139,16 @@ unsigned int HapDecode(const void *inputBuffer, unsigned long inputBufferBytes,
                        unsigned long *outputBufferBytesUsed,
                        unsigned int *outputBufferTextureFormat);
 
+/*!
+ If data is compressed outputBuffer is allocated by user provided alloc.
+ Otherwise, result *outputBuffer is the uncompressed data address in input range (inputBuffer, inputBuffer + inputBufferBytes).
+ */
+unsigned int HapDecodeMinCopy(const void *inputBuffer, unsigned long inputBufferBytes,
+                       unsigned int index,
+                       HapAlloc alloc,
+                       void **outputBuffer,
+                       unsigned long *outputBufferBytesUsed,
+                       unsigned int *outputBufferTextureFormat);
 /*
  If this returns HapResult_No_Error then outputTextureCount is set to the count of textures in the frame.
  */

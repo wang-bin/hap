@@ -733,6 +733,8 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
                                        unsigned int texture_section_type,
                                        HapDecodeCallback callback, void *info,
                                        void *outputBuffer, unsigned long outputBufferBytes,
+                                       void** pOutputBuffer,
+                                       HapAlloc alloc,
                                        unsigned long *outputBufferBytesUsed,
                                        unsigned int *outputBufferTextureFormat)
 {
@@ -837,6 +839,15 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
                 running_uncompressed_chunk_size += chunk_info[i].uncompressed_chunk_size;
             }
 
+            if (!outputBufferBytes) {
+                outputBuffer = alloc(running_uncompressed_chunk_size);
+                outputBufferBytes = running_uncompressed_chunk_size;
+                *pOutputBuffer = outputBuffer;
+                for (i = 0; i < chunk_count; i++) {
+                    chunk_info[i].uncompressed_chunk_data = (char*)outputBuffer + (intptr_t)chunk_info[i].uncompressed_chunk_data;
+                }
+            }
+
             if (result == HapResult_No_Error && running_uncompressed_chunk_size > outputBufferBytes)
             {
                 result = HapResult_Buffer_Too_Small;
@@ -892,6 +903,11 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
         {
             return HapResult_Internal_Error;
         }
+        if (!outputBufferBytes) {
+            outputBuffer = alloc(bytesUsed);
+            outputBufferBytes = bytesUsed;
+            *pOutputBuffer = outputBuffer;
+        }
         if (bytesUsed > outputBufferBytes)
         {
             return HapResult_Buffer_Too_Small;
@@ -908,6 +924,13 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
          Only one section is present containing a single block of uncompressed texture data
          */
         bytesUsed = texture_section_length;
+        if (!outputBuffer || !outputBufferBytes) {
+            outputBuffer = (void*)texture_section;
+            /*outputBuffer = alloc(bytesUsed);*/
+            outputBufferBytes = bytesUsed;
+            *pOutputBuffer = outputBuffer;
+            goto end;
+        }
         if (texture_section_length > outputBufferBytes)
         {
             return HapResult_Buffer_Too_Small;
@@ -918,6 +941,7 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
     {
         return HapResult_Bad_Frame;
     }
+end:
     /*
      Fill out the remaining return value
      */
@@ -990,6 +1014,16 @@ int hap_get_section_at_index(const void *input_buffer, uint32_t input_buffer_byt
     }
 }
 
+static void HapDecodeCallbackDefault(HapDecodeWorkFunction function, void *p, unsigned int count, void *info)
+{
+    int i;
+    for (i = 0; i < count; i++) {
+        // Invoke your multithreading mechanism to cause this function to be called
+        // on a suitable number of threads.
+        function(p, i);
+    }
+}
+
 unsigned int HapDecode(const void *inputBuffer, unsigned long inputBufferBytes,
                        unsigned int index,
                        HapDecodeCallback callback, void *info,
@@ -1032,6 +1066,59 @@ unsigned int HapDecode(const void *inputBuffer, unsigned long inputBufferBytes,
                                            callback, info,
                                            outputBuffer,
                                            outputBufferBytes,
+                                           NULL,
+                                           NULL,
+                                           outputBufferBytesUsed,
+                                           outputBufferTextureFormat);
+    }
+
+    return result;
+}
+
+unsigned int HapDecodeMinCopy(const void *inputBuffer, unsigned long inputBufferBytes,
+                       unsigned int index,
+                       HapAlloc alloc,
+                       void **outputBuffer,
+                       unsigned long *outputBufferBytesUsed,
+                       unsigned int *outputBufferTextureFormat)
+{
+    int result = HapResult_No_Error;
+    const void *section;
+    uint32_t section_length;
+    unsigned int section_type;
+
+    /*
+     Check arguments
+     */
+    if (inputBuffer == NULL
+        || index > 1
+        || alloc == NULL
+        || outputBuffer == NULL
+        || outputBufferTextureFormat == NULL
+        )
+    {
+        return HapResult_Bad_Arguments;
+    }
+
+    /*
+     Locate the section at the given index, which will either be the top-level section in a single texture image, or one of the
+     sections inside a multi-image top-level section.
+     */
+    result = hap_get_section_at_index(inputBuffer, inputBufferBytes, index, &section, &section_length, &section_type);
+
+    if (result == HapResult_No_Error)
+    {
+        /*
+         Decode the located texture
+         */
+        result = hap_decode_single_texture(section,
+                                           section_length,
+                                           section_type,
+                                           HapDecodeCallbackDefault, NULL,
+                                           NULL,
+                                           0,
+                                           outputBuffer,
+                                           alloc,
                                            outputBufferBytesUsed,
                                            outputBufferTextureFormat);
     }
