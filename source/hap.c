@@ -843,8 +843,10 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
                 outputBuffer = alloc(running_uncompressed_chunk_size);
                 outputBufferBytes = running_uncompressed_chunk_size;
                 *pOutputBuffer = outputBuffer;
+                size_t offset = 0;
                 for (i = 0; i < chunk_count; i++) {
-                    chunk_info[i].uncompressed_chunk_data = (char*)outputBuffer + (intptr_t)chunk_info[i].uncompressed_chunk_data;
+                    chunk_info[i].uncompressed_chunk_data = (char*)outputBuffer + offset;
+                    offset += chunk_info[i].uncompressed_chunk_size;
                 }
             }
 
