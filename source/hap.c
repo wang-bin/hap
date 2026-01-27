@@ -1,18 +1,18 @@
 /*
  hap.c
- 
+
  Copyright (c) 2011-2013, Tom Butterworth and Vidvox LLC. All rights reserved.
- 
+
  Redistribution and use in source and binary forms, with or without
  modification, are permitted provided that the following conditions are met:
- 
+
  * Redistributions of source code must retain the above copyright
  notice, this list of conditions and the following disclaimer.
- 
+
  * Redistributions in binary form must reproduce the above copyright
  notice, this list of conditions and the following disclaimer in the
  documentation and/or other materials provided with the distribution.
- 
+
  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
  WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
@@ -30,6 +30,9 @@
 #include <stdint.h>
 #include <string.h> // For memcpy for uncompressed frames
 #include "snappy-c.h"
+#if __has_include("lz4.h")
+# include "lz4.h"
+#endif
 
 #define kHapUInt24Max 0x00FFFFFF
 
@@ -41,6 +44,7 @@
 #define kHapCompressorNone 0xA
 #define kHapCompressorSnappy 0xB
 #define kHapCompressorComplex 0xC
+#define kHapCompressorLZ4 0xD
 
 #define kHapFormatRGBDXT1 0xB
 #define kHapFormatRGBADXT5 0xE
@@ -52,7 +56,7 @@
 
 /*
  Packed byte values for Hap
- 
+
  Format                     Compressor      Byte Code
  ----------------------------------------------------
  RGB_DXT1                   None            0xAB
@@ -174,7 +178,7 @@ static int hap_read_section_header(const void *buffer, uint32_t buffer_length, u
      The fourth byte stores the section type
      */
     *out_section_type = *(((uint8_t *)buffer) + 3U);
-    
+
     /*
      Verify the section does not extend beyond the buffer
      */
@@ -204,7 +208,7 @@ static void hap_write_section_header(void *buffer, size_t header_length, uint32_
         hap_write_3_byte_uint(buffer, 0U);
         hap_write_4_byte_uint(((uint8_t *)buffer) + 4U, section_length);
     }
-    
+
     /*
      The fourth byte stores the section type
      */
@@ -232,7 +236,7 @@ static unsigned int hap_texture_format_constant_for_format_identifier(unsigned i
             return HapTextureFormat_RGB_BPTC_SIGNED_FLOAT;
         default:
             return 0;
-            
+
     }
 }
 
@@ -387,12 +391,12 @@ static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long in
     {
         return HapResult_Buffer_Too_Small;
     }
-    
+
     /*
      To store frames of length greater than can be expressed in three bytes, we use an eight byte header (the last four bytes are the
      frame size). We don't know the compressed size until we have performed compression, but we know the worst-case size
      (the uncompressed size), so choose header-length based on that.
-     
+
      A simpler encoder could always use the eight-byte header variation.
      */
     if (inputBufferBytes > kHapUInt24Max)
@@ -493,9 +497,9 @@ static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long in
         top_section_length = inputBufferBytes;
         storedCompressor = kHapCompressorNone;
     }
-    
+
     storedFormat = hap_texture_format_identifier_for_format_constant(textureFormat);
-    
+
     hap_write_section_header(outputBuffer, top_section_header_length, top_section_length, hap_4_bit_packed_byte(storedCompressor, storedFormat));
 
     *outputBufferBytesUsed = top_section_length + top_section_header_length;
@@ -627,6 +631,22 @@ static void hap_decode_chunk(HapChunkDecodeInfo chunks[], unsigned int index)
                     break;
             }
         }
+#ifdef LZ4LIB_API
+        else if (chunks[index].compressor == kHapCompressorLZ4)
+        {
+            chunks[index].uncompressed_chunk_size = hap_read_4_byte_uint(chunks[index].compressed_chunk_data);
+            int lz4_result = LZ4_decompress_safe(chunks[index].compressed_chunk_data + 4, chunks[index].uncompressed_chunk_data,
+                chunks[index].compressed_chunk_size, chunks[index].uncompressed_chunk_size);
+            if (lz4_result != chunks[index].uncompressed_chunk_size)
+            {
+                chunks[index].result = HapResult_Bad_Frame;
+            }
+            else
+            {
+                chunks[index].result = HapResult_No_Error;
+            }
+        }
+#endif
         else if (chunks[index].compressor == kHapCompressorNone)
         {
             memcpy(chunks[index].uncompressed_chunk_data,
@@ -830,6 +850,10 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
                         break;
                     }
                 }
+                else if (chunk_info[i].compressor == kHapCompressorLZ4)
+                {
+                    chunk_info[i].uncompressed_chunk_size = hap_read_4_byte_uint(chunk_info[i].compressed_chunk_data);
+                }
                 else
                 {
                     chunk_info[i].uncompressed_chunk_size = chunk_info[i].compressed_chunk_size;
@@ -920,6 +944,27 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
             return HapResult_Internal_Error;
         }
     }
+#ifdef LZ4LIB_API
+    else if (compressor == kHapCompressorLZ4)
+    {
+        bytesUsed = hap_read_4_byte_uint(texture_section);
+        if (!outputBufferBytes) {
+            outputBuffer = alloc(bytesUsed);
+            outputBufferBytes = bytesUsed;
+            *pOutputBuffer = outputBuffer;
+        }
+        if (bytesUsed > outputBufferBytes)
+        {
+            return HapResult_Buffer_Too_Small;
+        }
+        int lz4_result = LZ4_decompress_safe((const char*)texture_section + 4, (char*)outputBuffer,
+                                             texture_section_length, outputBufferBytes);
+        if (lz4_result <= 0)
+        {
+            return HapResult_Internal_Error;
+        }
+    }
+#endif
     else if (compressor == kHapCompressorNone)
     {
         /*
@@ -951,7 +996,7 @@ end:
     {
         *outputBufferBytesUsed = bytesUsed;
     }
-    
+
     return HapResult_No_Error;
 }
 
@@ -1264,7 +1309,7 @@ unsigned int HapGetFrameTextureChunkCount(const void *inputBuffer, unsigned long
                 return result;
             }
         }
-        else if ((compressor == kHapCompressorSnappy)||(compressor == kHapCompressorNone))
+        else if (compressor == kHapCompressorSnappy || compressor == kHapCompressorLZ4 || compressor == kHapCompressorNone)
         {
             *chunk_count = 1;
         }
