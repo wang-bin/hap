@@ -30,6 +30,9 @@
 #include <stdint.h>
 #include <string.h> // For memcpy for uncompressed frames
 #include "snappy-c.h"
+#if __has_include("lz4.h")
+# include "lz4.h"
+#endif
 
 #define kHapUInt24Max 0x00FFFFFF
 
@@ -41,6 +44,7 @@
 #define kHapCompressorNone 0xA
 #define kHapCompressorSnappy 0xB
 #define kHapCompressorComplex 0xC
+#define kHapCompressorLZ4 0xD
 
 #define kHapFormatRGBDXT1 0xB
 #define kHapFormatRGBADXT5 0xE
@@ -312,6 +316,13 @@ static size_t hap_max_encoded_length(size_t input_bytes, unsigned int texture_fo
         size_t chunk_size = input_bytes / chunk_count;
         max_compressed_length = snappy_max_compressed_length(chunk_size) * chunk_count;
     }
+#ifdef LZ4LIB_API
+    else if (compressor == HapCompressorLZ4)
+    {
+        size_t chunk_size = input_bytes / chunk_count;
+        max_compressed_length = (size_t)(LZ4_compressBound((int)chunk_size) + 4) * chunk_count;
+    }
+#endif
     else
     {
         max_compressed_length = input_bytes;
@@ -322,6 +333,15 @@ static size_t hap_max_encoded_length(size_t input_bytes, unsigned int texture_fo
 }
 
 unsigned long HapMaxEncodedLength(unsigned int count,
+                                  unsigned long *inputBytes,
+                                  unsigned int *textureFormats,
+                                  unsigned int *chunkCounts)
+{
+    return HapMaxCompressorEncodedLength(HapCompressorSnappy, count, inputBytes, textureFormats, chunkCounts);
+}
+
+unsigned long HapMaxCompressorEncodedLength(enum HapCompressor compressor,
+                                  unsigned int count,
                                   unsigned long *inputBytes,
                                   unsigned int *textureFormats,
                                   unsigned int *chunkCounts)
@@ -345,8 +365,7 @@ unsigned long HapMaxEncodedLength(unsigned int count,
             return 0;
         }
 
-        // Assume snappy, the worst case
-        total_length += hap_max_encoded_length(inputBytes[i], textureFormats[i], HapCompressorSnappy, chunkCounts[i]);
+        total_length += hap_max_encoded_length(inputBytes[i], textureFormats[i], compressor, chunkCounts[i]);
     }
 
     return total_length;
@@ -376,6 +395,7 @@ static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long in
             )
         || (compressor != HapCompressorNone
             && compressor != HapCompressorSnappy
+            && compressor != HapCompressorLZ4
             )
         || outputBuffer == NULL
         || outputBufferBytesUsed == NULL
@@ -404,7 +424,9 @@ static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long in
         top_section_header_length = 4U;
     }
 
-    if (compressor == HapCompressorSnappy)
+    if (compressor == HapCompressorSnappy
+        || compressor == HapCompressorLZ4
+        )
     {
         /*
          We attempt to chunk as requested, and if resulting frame is larger than it is uncompressed then
@@ -456,6 +478,27 @@ static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long in
                     return HapResult_Internal_Error;
                 }
             }
+#ifdef LZ4LIB_API
+            else if (compressor == HapCompressorLZ4)
+            {
+                if (compress_buffer_remaining < 4)
+                {
+                    return HapResult_Buffer_Too_Small;
+                }
+                hap_write_4_byte_uint(compressed_data, (unsigned int)chunk_size);
+                int max_dest = (int)compress_buffer_remaining - 4;
+                int lz4_size = LZ4_compress_fast(chunk_input_start,
+                                                    compressed_data + 4,
+                                                    (int)chunk_size,
+                                                    max_dest,
+                                                    1);
+                if (lz4_size <= 0)
+                {
+                    return HapResult_Internal_Error;
+                }
+                chunk_packed_length = (size_t)lz4_size + 4;
+            }
+#endif
 
             if (compressor == HapCompressorNone || chunk_packed_length >= chunk_size)
             {
@@ -468,6 +511,10 @@ static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long in
             {
                 // ie we used snappy and saved some space
                 second_stage_compressor_table[i] = kHapCompressorSnappy;
+                if (compressor == HapCompressorLZ4)
+                {
+                    second_stage_compressor_table[i] = kHapCompressorLZ4;
+                }
             }
             hap_write_4_byte_uint(((uint8_t *)chunk_size_table) + (i * 4), chunk_packed_length);
             compressed_data += chunk_packed_length;
@@ -627,6 +674,22 @@ static void hap_decode_chunk(HapChunkDecodeInfo chunks[], unsigned int index)
                     break;
             }
         }
+#ifdef LZ4LIB_API
+        else if (chunks[index].compressor == kHapCompressorLZ4)
+        {
+            chunks[index].uncompressed_chunk_size = hap_read_4_byte_uint(chunks[index].compressed_chunk_data);
+            int lz4_result = LZ4_decompress_safe(chunks[index].compressed_chunk_data + 4, chunks[index].uncompressed_chunk_data,
+                chunks[index].compressed_chunk_size - 4, chunks[index].uncompressed_chunk_size);
+            if (lz4_result != chunks[index].uncompressed_chunk_size)
+            {
+                chunks[index].result = HapResult_Bad_Frame;
+            }
+            else
+            {
+                chunks[index].result = HapResult_No_Error;
+            }
+        }
+#endif
         else if (chunks[index].compressor == kHapCompressorNone)
         {
             memcpy(chunks[index].uncompressed_chunk_data,
@@ -830,6 +893,10 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
                         break;
                     }
                 }
+                else if (chunk_info[i].compressor == kHapCompressorLZ4)
+                {
+                    chunk_info[i].uncompressed_chunk_size = hap_read_4_byte_uint(chunk_info[i].compressed_chunk_data);
+                }
                 else
                 {
                     chunk_info[i].uncompressed_chunk_size = chunk_info[i].compressed_chunk_size;
@@ -920,6 +987,27 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
             return HapResult_Internal_Error;
         }
     }
+#ifdef LZ4LIB_API
+    else if (compressor == kHapCompressorLZ4)
+    {
+        bytesUsed = hap_read_4_byte_uint(texture_section);
+        if (!outputBufferBytes) {
+            outputBuffer = alloc(bytesUsed);
+            outputBufferBytes = bytesUsed;
+            *pOutputBuffer = outputBuffer;
+        }
+        if (bytesUsed > outputBufferBytes)
+        {
+            return HapResult_Buffer_Too_Small;
+        }
+        int lz4_result = LZ4_decompress_safe((const char*)texture_section + 4, (char*)outputBuffer,
+                                             texture_section_length - 4, outputBufferBytes);
+        if (lz4_result <= 0)
+        {
+            return HapResult_Internal_Error;
+        }
+    }
+#endif
     else if (compressor == kHapCompressorNone)
     {
         /*
@@ -1264,7 +1352,7 @@ unsigned int HapGetFrameTextureChunkCount(const void *inputBuffer, unsigned long
                 return result;
             }
         }
-        else if ((compressor == kHapCompressorSnappy)||(compressor == kHapCompressorNone))
+        else if (compressor == kHapCompressorSnappy || compressor == kHapCompressorLZ4 || compressor == kHapCompressorNone)
         {
             *chunk_count = 1;
         }

@@ -51,7 +51,8 @@ enum HapTextureFormat {
 
 enum HapCompressor {
     HapCompressorNone,
-    HapCompressorSnappy
+    HapCompressorSnappy,
+    HapCompressorLZ4,
 };
 
 enum HapResult {
@@ -81,6 +82,11 @@ unsigned long HapMaxEncodedLength(unsigned int count,
                                   unsigned int *textureFormats,
                                   unsigned int *chunkCounts);
 
+unsigned long HapMaxCompressorEncodedLength(enum HapCompressor compressor,
+                                  unsigned int count,
+                                  unsigned long *lengths,
+                                  unsigned int *textureFormats,
+                                  unsigned int *chunkCounts);
 /*
  Encodes one or multiple textures into one Hap frame, or returns an error.
 
