@@ -112,6 +112,14 @@ unsigned int HapEncode(unsigned int count,
                        void *outputBuffer, unsigned long outputBufferBytes,
                        unsigned long *outputBufferBytesUsed);
 
+unsigned int HapEncodeWithCompressorParams(unsigned int count,
+                       const void **inputBuffers, unsigned long *inputBuffersBytes,
+                       unsigned int *textureFormats,
+                       unsigned int *compressors,
+                       int *compressorParams,
+                       unsigned int *chunkCounts,
+                       void *outputBuffer, unsigned long outputBufferBytes,
+                       unsigned long *outputBufferBytesUsed);
 /*
  Decodes a texture from inputBuffer which is a Hap frame.
 

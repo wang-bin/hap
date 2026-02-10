@@ -372,7 +372,8 @@ unsigned long HapMaxCompressorEncodedLength(enum HapCompressor compressor,
 }
 
 static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long inputBufferBytes, unsigned int textureFormat,
-                                       unsigned int compressor, unsigned int chunkCount, void *outputBuffer,
+                                       unsigned int compressor, int compressorParam,
+                                       unsigned int chunkCount, void *outputBuffer,
                                        unsigned long outputBufferBytes, unsigned long *outputBufferBytesUsed)
 {
     size_t top_section_header_length;
@@ -491,7 +492,7 @@ static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long in
                                                     compressed_data + 4,
                                                     (int)chunk_size,
                                                     max_dest,
-                                                    1);
+                                                    compressorParam);
                 if (lz4_size <= 0)
                 {
                     return HapResult_Internal_Error;
@@ -550,10 +551,11 @@ static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long in
     return HapResult_No_Error;
 }
 
-unsigned int HapEncode(unsigned int count,
+unsigned int HapEncodeWithCompressorParams(unsigned int count,
                        const void **inputBuffers, unsigned long *inputBuffersBytes,
                        unsigned int *textureFormats,
                        unsigned int *compressors,
+                       int *compressorParams,
                        unsigned int *chunkCounts,
                        void *outputBuffer, unsigned long outputBufferBytes,
                        unsigned long *outputBufferBytesUsed)
@@ -590,6 +592,7 @@ unsigned int HapEncode(unsigned int count,
                                   inputBuffersBytes[0],
                                   textureFormats[0],
                                   compressors[0],
+                                  compressorParams ? compressorParams[0] : 0,
                                   chunkCounts[0],
                                   outputBuffer,
                                   outputBufferBytes,
@@ -631,6 +634,7 @@ unsigned int HapEncode(unsigned int count,
                                                      inputBuffersBytes[i],
                                                      textureFormats[i],
                                                      compressors[i],
+                                                     compressorParams ? compressorParams[i] : 0,
                                                      chunkCounts[i],
                                                      section,
                                                      outputBufferBytes - (top_section_header_length + top_section_length),
@@ -648,6 +652,17 @@ unsigned int HapEncode(unsigned int count,
 
         return HapResult_No_Error;
     }
+}
+
+unsigned int HapEncode(unsigned int count,
+                       const void **inputBuffers, unsigned long *inputBuffersBytes,
+                       unsigned int *textureFormats,
+                       unsigned int *compressors,
+                       unsigned int *chunkCounts,
+                       void *outputBuffer, unsigned long outputBufferBytes,
+                       unsigned long *outputBufferBytesUsed)
+{
+    return HapEncodeWithCompressorParams(count, inputBuffers, inputBuffersBytes, textureFormats, compressors, NULL, chunkCounts, outputBuffer, outputBufferBytes, outputBufferBytesUsed);    
 }
 
 static void hap_decode_chunk(HapChunkDecodeInfo chunks[], unsigned int index)
