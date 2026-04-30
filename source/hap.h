@@ -63,6 +63,18 @@ enum HapCompressor {
     HapCompressorLZ4,
 };
 
+/*
+ Chroma subsampling modes for YCbCr three-plane frames.
+ The subsampling is encoded in the relative pixel dimensions (and therefore
+ in the relative compressed byte sizes) of the Cb/Cr planes vs. the Y plane.
+ See HapYCbCrPlaneByteSize() and HapConvertTextureRGBToYCbCr().
+ */
+enum HapYCbCrSubsampling {
+    HapYCbCrSubsampling_444 = 0, /* Cb/Cr same width and height as Y */
+    HapYCbCrSubsampling_422 = 1, /* Cb/Cr half width, full height      */
+    HapYCbCrSubsampling_420 = 2, /* Cb/Cr half width, half height      */
+};
+
 enum HapResult {
     HapResult_No_Error = 0,
     HapResult_Bad_Arguments,
@@ -173,6 +185,89 @@ unsigned int HapGetFrameTextureFormat(const void *inputBuffer, unsigned long inp
  On return sets chunk_count to the chunk count value of the texture at index in the frame.
 */
 unsigned int HapGetFrameTextureChunkCount(const void *inputBuffer, unsigned long inputBufferBytes, unsigned int index, int *chunk_count);
+
+/*
+ Returns the number of bytes required for a single BC4/RGTC1-compressed plane
+ of a texture with the given dimensions and subsampling.
+
+ For the Y (luma) plane pass isChroma = 0.
+ For the Cb or Cr (chroma) planes pass isChroma = 1; the function will
+ divide the width (and, for 4:2:0, also the height) as required.
+
+ Width and height must each be a multiple of 4.
+ Returns 0 for invalid arguments.
+ */
+unsigned long HapYCbCrPlaneByteSize(unsigned int width, unsigned int height,
+                                    unsigned int subsampling, int isChroma);
+
+/*
+ Convert a BC-compressed RGB or RGBA texture to three BC4/RGTC1-compressed
+ YCbCr planes (BT.709 full-range).
+
+ The conversion pipeline is:
+   1. Decode input BC texture to raw RGBA pixels.
+   2. Convert RGBA -> full-resolution Y, Cb, Cr (BT.709).
+   3. Optionally downsample Cb/Cr according to subsampling.
+   4. Encode each plane to BC4/RGTC1.
+
+ When a CUDA device is available the conversion is performed on the GPU via
+ the CUDA driver API; otherwise a CPU fallback is used.
+
+ inputBuffer        BC-compressed source texture data.
+ inputBufferBytes   Size of inputBuffer in bytes.
+ inputTextureFormat One of: HapTextureFormat_RGB_DXT1, HapTextureFormat_RGBA_DXT5.
+ width              Texture width in pixels.  Must be a multiple of 4.
+ height             Texture height in pixels. Must be a multiple of 4.
+ subsampling        One of the HapYCbCrSubsampling values.
+ outputY/Cb/Cr      Caller-allocated output buffers for BC4-compressed planes.
+ outputYBytes etc.  Sizes of the output buffers; use HapYCbCrPlaneByteSize().
+ outputYBytesUsed   On success, set to the number of bytes written to outputY.
+ outputCbBytesUsed  On success, set to the number of bytes written to outputCb.
+ outputCrBytesUsed  On success, set to the number of bytes written to outputCr.
+
+ Returns HapResult_No_Error on success, or an error code.
+ */
+unsigned int HapConvertTextureRGBToYCbCr(
+    const void *inputBuffer,     unsigned long  inputBufferBytes,
+    unsigned int  inputTextureFormat,
+    unsigned int  width,         unsigned int   height,
+    unsigned int  subsampling,
+    void         *outputY,       unsigned long  outputYBytes,  unsigned long *outputYBytesUsed,
+    void         *outputCb,      unsigned long  outputCbBytes, unsigned long *outputCbBytesUsed,
+    void         *outputCr,      unsigned long  outputCrBytes, unsigned long *outputCrBytesUsed);
+
+/*
+ Convert three BC4/RGTC1-compressed YCbCr planes to a BC-compressed
+ RGB or RGBA texture (BT.709 full-range).
+
+ The conversion pipeline is the inverse of HapConvertTextureRGBToYCbCr:
+   1. Decode Y, Cb, Cr BC4 planes to raw single-channel pixels.
+   2. Convert YCbCr -> RGBA (chroma upsampling handled by coordinate mapping).
+   3. Encode RGBA to the requested BC format.
+
+ inputY/Cb/Cr       BC4-compressed Y, Cb, Cr plane data.
+ inputYBytes etc.   Sizes of the input buffers in bytes.
+ subsampling        Subsampling that was used when encoding the planes.
+ width              Y-plane texture width in pixels.  Must be a multiple of 4.
+ height             Y-plane texture height in pixels. Must be a multiple of 4.
+ outputTextureFormat Target format: HapTextureFormat_RGB_DXT1 or
+                    HapTextureFormat_RGBA_DXT5.
+ outputBuffer       Caller-allocated destination for the BC-compressed texture.
+ outputBufferBytes  Size of outputBuffer; use HapYCbCrPlaneByteSize() with
+                    isChroma=0 for size (same formula as BC4 planes).
+ outputBufferBytesUsed  On success, set to bytes written.
+
+ Returns HapResult_No_Error on success, or an error code.
+ */
+unsigned int HapConvertTextureYCbCrToRGB(
+    const void   *inputY,        unsigned long  inputYBytes,
+    const void   *inputCb,       unsigned long  inputCbBytes,
+    const void   *inputCr,       unsigned long  inputCrBytes,
+    unsigned int  subsampling,
+    unsigned int  width,         unsigned int   height,
+    unsigned int  outputTextureFormat,
+    void         *outputBuffer,  unsigned long  outputBufferBytes,
+    unsigned long *outputBufferBytesUsed);
 
 #ifdef __cplusplus
 }
