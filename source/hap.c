@@ -53,6 +53,9 @@
 #define kHapFormatRGBABPTC 0xC
 #define kHapFormatRGBBPTCUF 0x2
 #define kHapFormatRGBBPTCSF 0x3
+#define kHapFormatYBC4 0x4
+#define kHapFormatCbBC4 0x5
+#define kHapFormatCrBC4 0x6
 
 /*
  Packed byte values for Hap
@@ -80,6 +83,15 @@
  RGB_BPTC_SIGNED_FLOAT      None            0xA3
  RGB_BPTC_SIGNED_FLOAT      Snappy          0xB3
  RGB_BPTC_SIGNED_FLOAT      Complex         0xC3
+ Y_BC4 (YCbCr Y plane)      None            0xA4
+ Y_BC4 (YCbCr Y plane)      Snappy          0xB4
+ Y_BC4 (YCbCr Y plane)      Complex         0xC4
+ Cb_BC4 (YCbCr Cb plane)    None            0xA5
+ Cb_BC4 (YCbCr Cb plane)    Snappy          0xB5
+ Cb_BC4 (YCbCr Cb plane)    Complex         0xC5
+ Cr_BC4 (YCbCr Cr plane)    None            0xA6
+ Cr_BC4 (YCbCr Cr plane)    Snappy          0xB6
+ Cr_BC4 (YCbCr Cr plane)    Complex         0xC6
  */
 
 /*
@@ -234,6 +246,12 @@ static unsigned int hap_texture_format_constant_for_format_identifier(unsigned i
             return HapTextureFormat_RGB_BPTC_UNSIGNED_FLOAT;
         case kHapFormatRGBBPTCSF:
             return HapTextureFormat_RGB_BPTC_SIGNED_FLOAT;
+        case kHapFormatYBC4:
+            return HapTextureFormat_Y_BC4;
+        case kHapFormatCbBC4:
+            return HapTextureFormat_Cb_BC4;
+        case kHapFormatCrBC4:
+            return HapTextureFormat_Cr_BC4;
         default:
             return 0;
 
@@ -259,6 +277,12 @@ static unsigned int hap_texture_format_identifier_for_format_constant(unsigned i
             return kHapFormatRGBBPTCUF;
         case HapTextureFormat_RGB_BPTC_SIGNED_FLOAT:
             return kHapFormatRGBBPTCSF;
+        case HapTextureFormat_Y_BC4:
+            return kHapFormatYBC4;
+        case HapTextureFormat_Cb_BC4:
+            return kHapFormatCbBC4;
+        case HapTextureFormat_Cr_BC4:
+            return kHapFormatCrBC4;
         default:
             return 0;
     }
@@ -291,6 +315,9 @@ static unsigned int hap_limited_chunk_count_for_frame(size_t input_bytes, unsign
     switch (texture_format) {
         case HapTextureFormat_RGB_DXT1:
         case HapTextureFormat_A_RGTC1:
+        case HapTextureFormat_Y_BC4:
+        case HapTextureFormat_Cb_BC4:
+        case HapTextureFormat_Cr_BC4:
             dxt_block_count = input_bytes / 8;
             break;
         default:
@@ -341,7 +368,7 @@ unsigned long HapMaxEncodedLength(unsigned int count,
     unsigned long total_length = 8;
 
     // Return 0 for bad arguments
-    if (count == 0 || count > 2
+    if (count == 0 || count > 3
         || inputBytes == NULL
         || textureFormats == NULL
         || chunkCounts == NULL)
@@ -384,6 +411,9 @@ static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long in
             && textureFormat != HapTextureFormat_RGBA_BPTC_UNORM
             && textureFormat != HapTextureFormat_RGB_BPTC_UNSIGNED_FLOAT
             && textureFormat != HapTextureFormat_RGB_BPTC_SIGNED_FLOAT
+            && textureFormat != HapTextureFormat_Y_BC4
+            && textureFormat != HapTextureFormat_Cb_BC4
+            && textureFormat != HapTextureFormat_Cr_BC4
             )
         || (compressor != HapCompressorNone
             && compressor != HapCompressorSnappy
@@ -553,7 +583,7 @@ unsigned int HapEncode(unsigned int count,
     size_t top_section_length;
     unsigned long section_length;
 
-    if (count == 0 || count > 2 // A frame must contain one or two textures
+    if (count == 0 || count > 3 // A frame must contain one, two, or three textures
         || inputBuffers == NULL
         || inputBuffersBytes == NULL
         || textureFormats == NULL
@@ -586,16 +616,34 @@ unsigned int HapEncode(unsigned int count,
                                   outputBufferBytes,
                                   outputBufferBytesUsed);
     }
-    else if ((textureFormats[0] != HapTextureFormat_YCoCg_DXT5 && textureFormats[1] != HapTextureFormat_YCoCg_DXT5)
-             && (textureFormats[0] != HapTextureFormat_A_RGTC1 && textureFormats[1] != HapTextureFormat_A_RGTC1))
+    else if (count == 2
+             && ((textureFormats[0] == HapTextureFormat_YCoCg_DXT5 || textureFormats[1] == HapTextureFormat_YCoCg_DXT5)
+                 && (textureFormats[0] == HapTextureFormat_A_RGTC1 || textureFormats[1] == HapTextureFormat_A_RGTC1)))
+    {
+        /*
+         Permitted 2-texture combination:
+         HapTextureFormat_YCoCg_DXT5 + HapTextureFormat_A_RGTC1
+         */
+    }
+    else if (count == 3
+             && ((textureFormats[0] == HapTextureFormat_Y_BC4 || textureFormats[1] == HapTextureFormat_Y_BC4 || textureFormats[2] == HapTextureFormat_Y_BC4)
+                 && (textureFormats[0] == HapTextureFormat_Cb_BC4 || textureFormats[1] == HapTextureFormat_Cb_BC4 || textureFormats[2] == HapTextureFormat_Cb_BC4)
+                 && (textureFormats[0] == HapTextureFormat_Cr_BC4 || textureFormats[1] == HapTextureFormat_Cr_BC4 || textureFormats[2] == HapTextureFormat_Cr_BC4)))
+    {
+        /*
+         Permitted 3-texture combination:
+         HapTextureFormat_Y_BC4 + HapTextureFormat_Cb_BC4 + HapTextureFormat_Cr_BC4
+         */
+    }
+    else
     {
         /*
          Permitted combinations:
-         HapTextureFormat_YCoCg_DXT5 + HapTextureFormat_A_RGTC1
+         2-texture: HapTextureFormat_YCoCg_DXT5 + HapTextureFormat_A_RGTC1
+         3-texture: HapTextureFormat_Y_BC4 + HapTextureFormat_Cb_BC4 + HapTextureFormat_Cr_BC4
          */
         return HapResult_Bad_Arguments;
     }
-    else
     {
         // Calculate the worst-case size for the top section and choose a header-length based on that
         top_section_length = 0;
@@ -1121,7 +1169,7 @@ unsigned int HapDecode(const void *inputBuffer, unsigned long inputBufferBytes,
      Check arguments
      */
     if (inputBuffer == NULL
-        || index > 1
+        || index > 2
         || callback == NULL
         || outputBuffer == NULL
         || outputBufferTextureFormat == NULL
@@ -1172,7 +1220,7 @@ unsigned int HapDecodeMinCopy(const void *inputBuffer, unsigned long inputBuffer
      Check arguments
      */
     if (inputBuffer == NULL
-        || index > 1
+        || index > 2
         || alloc == NULL
         || outputBuffer == NULL
         || outputBufferTextureFormat == NULL
@@ -1264,7 +1312,7 @@ unsigned int HapGetFrameTextureFormat(const void *inputBuffer, unsigned long inp
      Check arguments
      */
     if (inputBuffer == NULL
-        || index > 1
+        || index > 2
         || outputBufferTextureFormat == NULL
         )
     {
@@ -1305,7 +1353,7 @@ unsigned int HapGetFrameTextureChunkCount(const void *inputBuffer, unsigned long
      Check arguments
      */
     if (inputBuffer == NULL
-        || index > 1
+        || index > 2
         )
     {
         return HapResult_Bad_Arguments;

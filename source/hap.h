@@ -36,7 +36,9 @@ extern "C" {
 
 /*
  These match the constants defined by GL_EXT_texture_compression_s3tc,
- GL_ARB_texture_compression_rgtc and GL_ARB_texture_compression_bptc
+ GL_ARB_texture_compression_rgtc and GL_ARB_texture_compression_bptc.
+ Values 0x01-0x0F are custom Hap-defined constants for formats with no
+ directly corresponding OpenGL enum.
  */
 
 enum HapTextureFormat {
@@ -47,6 +49,12 @@ enum HapTextureFormat {
     HapTextureFormat_RGBA_BPTC_UNORM = 0x8E8C,
     HapTextureFormat_RGB_BPTC_UNSIGNED_FLOAT = 0x8E8F,
     HapTextureFormat_RGB_BPTC_SIGNED_FLOAT = 0x8E8E,
+    /* YCbCr planar formats: each plane is independently BC4/RGTC1-compressed.
+       Three planes (Y + Cb + Cr) form one YCbCr frame.  Subsampling (4:4:4,
+       4:2:2, 4:2:0) is inferred from the relative sizes of the planes. */
+    HapTextureFormat_Y_BC4 = 0x02,
+    HapTextureFormat_Cb_BC4 = 0x03,
+    HapTextureFormat_Cr_BC4 = 0x04,
 };
 
 enum HapCompressor {
@@ -72,7 +80,7 @@ typedef void* (*HapAlloc)(size_t size);
 
 /*
  Returns the maximum size of an output buffer for a frame composed of one or more textures, or returns 0 on error.
- count is the number of textures (1 or 2) and matches the number of values in the array arguments
+ count is the number of textures (1, 2, or 3) and matches the number of values in the array arguments
  lengths is an array of input texture lengths in bytes
  textureFormats is an array of HapTextureFormats
  chunkCounts is an array of chunk counts (1 or more)
@@ -87,9 +95,10 @@ unsigned long HapMaxEncodedLength(unsigned int count,
 
  Permitted multiple-texture combinations are:
   HapTextureFormat_YCoCg_DXT5 + HapTextureFormat_A_RGTC1
+  HapTextureFormat_Y_BC4 + HapTextureFormat_Cb_BC4 + HapTextureFormat_Cr_BC4
 
  Use HapMaxEncodedLength() to discover the minimal value for outputBufferBytes.
- count is the number of textures (1 or 2) and matches the number of values in the array arguments
+ count is the number of textures (1, 2, or 3) and matches the number of values in the array arguments
  inputBuffers is an array of count pointers to texture data
  inputBufferBytes is an array of texture data lengths in bytes
  textureFormats is an array of HapTextureFormats

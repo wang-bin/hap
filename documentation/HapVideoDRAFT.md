@@ -70,6 +70,15 @@ The following are the only section types permitted at the top level of a frame. 
 |0xA3                  |RGB Signed Float|BC6S               |None                        |
 |0xB3                  |RGB Signed Float|BC6S               |Snappy                      |
 |0xC3                  |RGB Signed Float|BC6S               |Consult decode instructions |
+|0xA4                  |YCbCr Y plane   |RGTC1/BC4          |None                        |
+|0xB4                  |YCbCr Y plane   |RGTC1/BC4          |Snappy                      |
+|0xC4                  |YCbCr Y plane   |RGTC1/BC4          |Consult decode instructions |
+|0xA5                  |YCbCr Cb plane  |RGTC1/BC4          |None                        |
+|0xB5                  |YCbCr Cb plane  |RGTC1/BC4          |Snappy                      |
+|0xC5                  |YCbCr Cb plane  |RGTC1/BC4          |Consult decode instructions |
+|0xA6                  |YCbCr Cr plane  |RGTC1/BC4          |None                        |
+|0xB6                  |YCbCr Cr plane  |RGTC1/BC4          |Snappy                      |
+|0xC6                  |YCbCr Cr plane  |RGTC1/BC4          |Consult decode instructions |
 |0x0D                  |Multiple images |Not Applicable     |Not Applicable              |
 
 #### Simple Top-Level Sections
@@ -78,11 +87,22 @@ If the top-level section type indicates a single or no second-stage compressor, 
 
 #### Multiple-Image Sections
 
-If the top-level section type indicates multiple images, the section itself contains one top-level section in any image format, or two top-level sections in a permitted combination. Where two images are contained, the dimensions of each image must match. Each contained image section is treated as if it were a standalone top-level section, and the components of the images from these sections are combined to create the final image.
+If the top-level section type indicates multiple images, the section itself contains one top-level section in any image format, or two or three top-level sections in a permitted combination. Where multiple images are contained, the Y-plane dimensions of each image must be consistent with the combination. Each contained image section is treated as if it were a standalone top-level section, and the components of the images from these sections are combined to create the final image.
 
-|Permitted Multiple-Image Combinations          |
-|-----------------------------------------------|
-|Scaled YCoCg DXT5 + RGTC1/BC4 Compressed Alpha |
+|Permitted Multiple-Image Combinations                                              |
+|-----------------------------------------------------------------------------------|
+|Scaled YCoCg DXT5 + RGTC1/BC4 Compressed Alpha                                    |
+|YCbCr Y plane RGTC1/BC4 + Cb plane RGTC1/BC4 + Cr plane RGTC1/BC4                 |
+
+For YCbCr three-plane frames the chroma subsampling is implicit in the relative compressed sizes of the Cb and Cr planes compared to the Y plane:
+
+| Chroma Subsampling | Cb/Cr plane size relative to Y plane |
+|--------------------|--------------------------------------|
+| 4:4:4              | Equal size (same width and height)   |
+| 4:2:2              | Half width, full height              |
+| 4:2:0              | Half width, half height              |
+
+The planes must appear in order: Y plane first, then Cb plane, then Cr plane.
 
 #### Decode Instructions
 
@@ -131,15 +151,18 @@ The section data is a series of four-byte fields being unsigned integers stored 
 
 Where Hap frames are present in a stream or container and identifiers are required, the following usage is recommended:
 
-|Texture Format(s)                       |Human-Readable Name |Four-Character Code |
-|----------------------------------------|--------------------|--------------------|
-|RGB DXT1/BC1                            |Hap                 |Hap1                |
-|RGBA DXT5/BC3                           |Hap Alpha           |Hap5                |
-|Scaled YCoCg DXT5/BC3                   |Hap Q               |HapY                |
-|Scaled YCoCg DXT5/BC3 + Alpha RGTC1/BC4 |Hap Q Alpha         |HapM                |
-|Alpha RGTC1/BC4                         |Hap Alpha-Only      |HapA                |
-|RGBA BPTC/BC7 UNORM                     |Hap R               |Hap7                |
-|RGB BPTC/BC6U and BC6S                  |Hap HDR             |HapH                |
+|Texture Format(s)                                          |Human-Readable Name  |Four-Character Code |
+|-----------------------------------------------------------|---------------------|--------------------|
+|RGB DXT1/BC1                                               |Hap                  |Hap1                |
+|RGBA DXT5/BC3                                              |Hap Alpha            |Hap5                |
+|Scaled YCoCg DXT5/BC3                                      |Hap Q                |HapY                |
+|Scaled YCoCg DXT5/BC3 + Alpha RGTC1/BC4                    |Hap Q Alpha          |HapM                |
+|Alpha RGTC1/BC4                                            |Hap Alpha-Only       |HapA                |
+|RGBA BPTC/BC7 UNORM                                        |Hap R                |Hap7                |
+|RGB BPTC/BC6U and BC6S                                     |Hap HDR              |HapH                |
+|YCbCr Y + Cb + Cr RGTC1/BC4 (4:4:4)                       |Hap YCbCr 444        |HapC                |
+|YCbCr Y (full) + Cb + Cr (half-width) RGTC1/BC4 (4:2:2)   |Hap YCbCr 422        |Hp22                |
+|YCbCr Y (full) + Cb + Cr (quarter-size) RGTC1/BC4 (4:2:0) |Hap YCbCr 420        |Hp20                |
 
 
 [1]: http://www.opengl.org/registry/specs/EXT/texture_compression_s3tc.txt
