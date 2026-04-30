@@ -94,13 +94,15 @@ If the top-level section type indicates multiple images, the section itself cont
 |Scaled YCoCg DXT5 + RGTC1/BC4 Compressed Alpha                                    |
 |YCbCr Y plane RGTC1/BC4 + Cb plane RGTC1/BC4 + Cr plane RGTC1/BC4                 |
 
-For YCbCr three-plane frames the chroma subsampling is implicit in the relative compressed sizes of the Cb and Cr planes compared to the Y plane:
+For YCbCr three-plane frames the chroma subsampling is implicit in the pixel dimensions of the Cb and Cr planes relative to the Y plane:
 
-| Chroma Subsampling | Cb/Cr plane size relative to Y plane |
-|--------------------|--------------------------------------|
-| 4:4:4              | Equal size (same width and height)   |
-| 4:2:2              | Half width, full height              |
-| 4:2:0              | Half width, half height              |
+| Chroma Subsampling | Cb/Cr pixel dimensions relative to Y plane |
+|--------------------|--------------------------------------------|
+| 4:4:4              | Equal width and height                     |
+| 4:2:2              | Half width, full height                    |
+| 4:2:0              | Half width, half height                    |
+
+Because BC4/RGTC1 encodes 4×4 pixel blocks and produces a fixed number of bytes per block, the compressed byte size of a plane is proportional to its pixel area. A decoder can therefore determine the chroma subsampling by comparing the compressed byte sizes of the Cb or Cr sections to the Y section: equal size indicates 4:4:4, half size indicates 4:2:2, and quarter size indicates 4:2:0.
 
 The planes must appear in order: Y plane first, then Cb plane, then Cr plane.
 
@@ -163,6 +165,8 @@ Where Hap frames are present in a stream or container and identifiers are requir
 |YCbCr Y + Cb + Cr RGTC1/BC4 (4:4:4)                       |Hap YCbCr 444        |HapC                |
 |YCbCr Y (full) + Cb + Cr (half-width) RGTC1/BC4 (4:2:2)   |Hap YCbCr 422        |Hp22                |
 |YCbCr Y (full) + Cb + Cr (quarter-size) RGTC1/BC4 (4:2:0) |Hap YCbCr 420        |Hp20                |
+
+For YCbCr formats, the chroma subsampling is encoded in the four-character code itself, allowing a container (such as QuickTime/MOV) to identify the subsampling without inspecting individual frames. A muxer should write the FourCC that corresponds to the intended subsampling, and a demuxer or player can read the FourCC to determine the subsampling before decoding any frame data.
 
 
 [1]: http://www.opengl.org/registry/specs/EXT/texture_compression_s3tc.txt
