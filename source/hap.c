@@ -617,21 +617,21 @@ unsigned int HapEncode(unsigned int count,
                                   outputBufferBytesUsed);
     }
     else if (count == 2
-             && ((textureFormats[0] == HapTextureFormat_YCoCg_DXT5 || textureFormats[1] == HapTextureFormat_YCoCg_DXT5)
-                 && (textureFormats[0] == HapTextureFormat_A_RGTC1 || textureFormats[1] == HapTextureFormat_A_RGTC1)))
+             && ((textureFormats[0] == HapTextureFormat_YCoCg_DXT5 && textureFormats[1] == HapTextureFormat_A_RGTC1)
+                 || (textureFormats[0] == HapTextureFormat_A_RGTC1 && textureFormats[1] == HapTextureFormat_YCoCg_DXT5)))
     {
         /*
          Permitted 2-texture combination:
-         HapTextureFormat_YCoCg_DXT5 + HapTextureFormat_A_RGTC1
+         HapTextureFormat_YCoCg_DXT5 + HapTextureFormat_A_RGTC1 (in either order)
          */
     }
     else if (count == 3
-             && ((textureFormats[0] == HapTextureFormat_Y_BC4 || textureFormats[1] == HapTextureFormat_Y_BC4 || textureFormats[2] == HapTextureFormat_Y_BC4)
-                 && (textureFormats[0] == HapTextureFormat_Cb_BC4 || textureFormats[1] == HapTextureFormat_Cb_BC4 || textureFormats[2] == HapTextureFormat_Cb_BC4)
-                 && (textureFormats[0] == HapTextureFormat_Cr_BC4 || textureFormats[1] == HapTextureFormat_Cr_BC4 || textureFormats[2] == HapTextureFormat_Cr_BC4)))
+             && textureFormats[0] == HapTextureFormat_Y_BC4
+             && textureFormats[1] == HapTextureFormat_Cb_BC4
+             && textureFormats[2] == HapTextureFormat_Cr_BC4)
     {
         /*
-         Permitted 3-texture combination:
+         Permitted 3-texture combination (planes must be in Y, Cb, Cr order):
          HapTextureFormat_Y_BC4 + HapTextureFormat_Cb_BC4 + HapTextureFormat_Cr_BC4
          */
     }
