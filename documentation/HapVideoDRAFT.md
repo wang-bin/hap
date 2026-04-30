@@ -138,7 +138,6 @@ The section data is a series of single-byte fields indicating the second-stage c
 |-----------------------|-------------|
 |0x0A                   |Uncompressed |
 |0x0B                   |Snappy       |
-|0x0D                   |LZ4          |
 
 ##### Chunk Size Table
 

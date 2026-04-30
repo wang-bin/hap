@@ -364,15 +364,6 @@ unsigned long HapMaxEncodedLength(unsigned int count,
                                   unsigned int *textureFormats,
                                   unsigned int *chunkCounts)
 {
-    return HapMaxCompressorEncodedLength(HapCompressorSnappy, count, inputBytes, textureFormats, chunkCounts);
-}
-
-unsigned long HapMaxCompressorEncodedLength(enum HapCompressor compressor,
-                                  unsigned int count,
-                                  unsigned long *inputBytes,
-                                  unsigned int *textureFormats,
-                                  unsigned int *chunkCounts)
-{
     // Start with the length of a multiple-image section header
     unsigned long total_length = 8;
 
@@ -392,15 +383,15 @@ unsigned long HapMaxCompressorEncodedLength(enum HapCompressor compressor,
             return 0;
         }
 
-        total_length += hap_max_encoded_length(inputBytes[i], textureFormats[i], compressor, chunkCounts[i]);
+        // Assume snappy, the worst case
+        total_length += hap_max_encoded_length(inputBytes[i], textureFormats[i], HapCompressorSnappy, chunkCounts[i]);
     }
 
     return total_length;
 }
 
 static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long inputBufferBytes, unsigned int textureFormat,
-                                       unsigned int compressor, int compressorParam,
-                                       unsigned int chunkCount, void *outputBuffer,
+                                       unsigned int compressor, unsigned int chunkCount, void *outputBuffer,
                                        unsigned long outputBufferBytes, unsigned long *outputBufferBytesUsed)
 {
     size_t top_section_header_length;
@@ -518,11 +509,10 @@ static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long in
                 }
                 hap_write_4_byte_uint(compressed_data, (unsigned int)chunk_size);
                 int max_dest = (int)compress_buffer_remaining - 4;
-                int lz4_size = LZ4_compress_fast(chunk_input_start,
+                int lz4_size = LZ4_compress_default(chunk_input_start,
                                                     compressed_data + 4,
                                                     (int)chunk_size,
-                                                    max_dest,
-                                                    compressorParam);
+                                                    max_dest);
                 if (lz4_size <= 0)
                 {
                     return HapResult_Internal_Error;
@@ -581,11 +571,10 @@ static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long in
     return HapResult_No_Error;
 }
 
-unsigned int HapEncodeWithCompressorParams(unsigned int count,
+unsigned int HapEncode(unsigned int count,
                        const void **inputBuffers, unsigned long *inputBuffersBytes,
                        unsigned int *textureFormats,
                        unsigned int *compressors,
-                       int *compressorParams,
                        unsigned int *chunkCounts,
                        void *outputBuffer, unsigned long outputBufferBytes,
                        unsigned long *outputBufferBytesUsed)
@@ -622,7 +611,6 @@ unsigned int HapEncodeWithCompressorParams(unsigned int count,
                                   inputBuffersBytes[0],
                                   textureFormats[0],
                                   compressors[0],
-                                  compressorParams ? compressorParams[0] : 0,
                                   chunkCounts[0],
                                   outputBuffer,
                                   outputBufferBytes,
@@ -633,8 +621,8 @@ unsigned int HapEncodeWithCompressorParams(unsigned int count,
                  || (textureFormats[0] == HapTextureFormat_A_RGTC1 && textureFormats[1] == HapTextureFormat_YCoCg_DXT5)))
     {
         /*
-         Permitted 2-texture combination (either order):
-         HapTextureFormat_YCoCg_DXT5 + HapTextureFormat_A_RGTC1
+         Permitted 2-texture combination:
+         HapTextureFormat_YCoCg_DXT5 + HapTextureFormat_A_RGTC1 (in either order)
          */
     }
     else if (count == 3
@@ -651,7 +639,7 @@ unsigned int HapEncodeWithCompressorParams(unsigned int count,
     {
         /*
          Permitted combinations:
-         2-texture: HapTextureFormat_YCoCg_DXT5 + HapTextureFormat_A_RGTC1 (either order)
+         2-texture: HapTextureFormat_YCoCg_DXT5 + HapTextureFormat_A_RGTC1
          3-texture: HapTextureFormat_Y_BC4 + HapTextureFormat_Cb_BC4 + HapTextureFormat_Cr_BC4
          */
         return HapResult_Bad_Arguments;
@@ -682,7 +670,6 @@ unsigned int HapEncodeWithCompressorParams(unsigned int count,
                                                      inputBuffersBytes[i],
                                                      textureFormats[i],
                                                      compressors[i],
-                                                     compressorParams ? compressorParams[i] : 0,
                                                      chunkCounts[i],
                                                      section,
                                                      outputBufferBytes - (top_section_header_length + top_section_length),
@@ -700,17 +687,6 @@ unsigned int HapEncodeWithCompressorParams(unsigned int count,
 
         return HapResult_No_Error;
     }
-}
-
-unsigned int HapEncode(unsigned int count,
-                       const void **inputBuffers, unsigned long *inputBuffersBytes,
-                       unsigned int *textureFormats,
-                       unsigned int *compressors,
-                       unsigned int *chunkCounts,
-                       void *outputBuffer, unsigned long outputBufferBytes,
-                       unsigned long *outputBufferBytesUsed)
-{
-    return HapEncodeWithCompressorParams(count, inputBuffers, inputBuffersBytes, textureFormats, compressors, NULL, chunkCounts, outputBuffer, outputBufferBytes, outputBufferBytesUsed);
 }
 
 static void hap_decode_chunk(HapChunkDecodeInfo chunks[], unsigned int index)
@@ -742,7 +718,7 @@ static void hap_decode_chunk(HapChunkDecodeInfo chunks[], unsigned int index)
         {
             chunks[index].uncompressed_chunk_size = hap_read_4_byte_uint(chunks[index].compressed_chunk_data);
             int lz4_result = LZ4_decompress_safe(chunks[index].compressed_chunk_data + 4, chunks[index].uncompressed_chunk_data,
-                chunks[index].compressed_chunk_size - 4, chunks[index].uncompressed_chunk_size);
+                chunks[index].compressed_chunk_size, chunks[index].uncompressed_chunk_size);
             if (lz4_result != chunks[index].uncompressed_chunk_size)
             {
                 chunks[index].result = HapResult_Bad_Frame;
@@ -1064,7 +1040,7 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
             return HapResult_Buffer_Too_Small;
         }
         int lz4_result = LZ4_decompress_safe((const char*)texture_section + 4, (char*)outputBuffer,
-                                             texture_section_length - 4, outputBufferBytes);
+                                             texture_section_length, outputBufferBytes);
         if (lz4_result <= 0)
         {
             return HapResult_Internal_Error;
@@ -1418,83 +1394,6 @@ unsigned int HapGetFrameTextureChunkCount(const void *inputBuffer, unsigned long
         else if (compressor == kHapCompressorSnappy || compressor == kHapCompressorLZ4 || compressor == kHapCompressorNone)
         {
             *chunk_count = 1;
-        }
-        else
-        {
-            return HapResult_Bad_Frame;
-        }
-    }
-    return result;
-}
-
-enum HapCompressor ToCompressor(unsigned int c)
-{
-    switch (c) {
-    case kHapCompressorNone: return HapCompressorNone;
-    case kHapCompressorSnappy: return HapCompressorSnappy;
-    case kHapCompressorLZ4: return HapCompressorLZ4;
-    default: return c;
-    }
-}
-
-unsigned int HapGetFrameTextureCompressor(const void *inputBuffer, unsigned long inputBufferBytes, unsigned int index, int *chunk_count, enum HapCompressor *compressor2)
-{
-
-    unsigned int result = HapResult_No_Error;
-    const void *section;
-    uint32_t section_length;
-    unsigned int section_type;
-    *chunk_count = 0;
-
-    /*
-     Check arguments
-     */
-    if (inputBuffer == NULL
-        || index > 2
-        )
-    {
-        return HapResult_Bad_Arguments;
-    }
-    /*
-     Locate the section at the given index, which will either be the top-level section in a single texture image, or one of the
-     sections inside a multi-image top-level section.
-     */
-    result = hap_get_section_at_index(inputBuffer, inputBufferBytes, index, &section, &section_length, &section_type);
-
-    if (result == HapResult_No_Error)
-    {
-        unsigned int compressor;
-
-        /*
-         One top-level section type describes texture-format and second-stage compression
-         Hap compressor/format constants can be unpacked by reading the top and bottom four bits.
-         */
-        compressor = hap_top_4_bits(section_type);
-
-        if (compressor == kHapCompressorComplex)
-        {
-            /*
-             The top-level section should contain a Decode Instructions Container followed by frame data
-             */
-            const void *compressors = NULL;
-            const void *chunk_sizes = NULL;
-            const void *chunk_offsets = NULL;
-            const char *frame_data = NULL;
-
-            result = hap_decode_header_complex_instructions(section, section_length, chunk_count, &compressors, &chunk_sizes, &chunk_offsets, &frame_data);
-
-            if (result != HapResult_No_Error)
-            {
-                return result;
-            }
-            for (int i = 0; i < *chunk_count; i++) {
-                compressor2[i] = ToCompressor(*(((uint8_t *)compressors) + i));
-            }
-        }
-        else if (compressor == kHapCompressorSnappy || compressor == kHapCompressorLZ4 || compressor == kHapCompressorNone)
-        {
-            *chunk_count = 1;
-            compressor2[0] = ToCompressor(compressor);
         }
         else
         {

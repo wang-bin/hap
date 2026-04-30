@@ -90,11 +90,6 @@ unsigned long HapMaxEncodedLength(unsigned int count,
                                   unsigned int *textureFormats,
                                   unsigned int *chunkCounts);
 
-unsigned long HapMaxCompressorEncodedLength(enum HapCompressor compressor,
-                                  unsigned int count,
-                                  unsigned long *lengths,
-                                  unsigned int *textureFormats,
-                                  unsigned int *chunkCounts);
 /*
  Encodes one or multiple textures into one Hap frame, or returns an error.
 
@@ -121,14 +116,6 @@ unsigned int HapEncode(unsigned int count,
                        void *outputBuffer, unsigned long outputBufferBytes,
                        unsigned long *outputBufferBytesUsed);
 
-unsigned int HapEncodeWithCompressorParams(unsigned int count,
-                       const void **inputBuffers, unsigned long *inputBuffersBytes,
-                       unsigned int *textureFormats,
-                       unsigned int *compressors,
-                       int *compressorParams,
-                       unsigned int *chunkCounts,
-                       void *outputBuffer, unsigned long outputBufferBytes,
-                       unsigned long *outputBufferBytesUsed);
 /*
  Decodes a texture from inputBuffer which is a Hap frame.
 
@@ -186,10 +173,6 @@ unsigned int HapGetFrameTextureFormat(const void *inputBuffer, unsigned long inp
  On return sets chunk_count to the chunk count value of the texture at index in the frame.
 */
 unsigned int HapGetFrameTextureChunkCount(const void *inputBuffer, unsigned long inputBufferBytes, unsigned int index, int *chunk_count);
-/*
- On return sets chunk_count to the chunk count value of the texture at index in the frame and compressor array of size chunk_count.
-*/
-unsigned int HapGetFrameTextureCompressor(const void *inputBuffer, unsigned long inputBufferBytes, unsigned int index, int *chunk_count, enum HapCompressor *compressor);
 
 #ifdef __cplusplus
 }
