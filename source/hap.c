@@ -34,11 +34,13 @@
 # include "lz4.h"
 #endif
 /*
- When compiled with nvcc and the nvComp headers are present, GPU-accelerated
- LZ4 and Snappy compression/decompression is enabled.  The on-disk format is
- identical to the CPU path so encoded frames are fully interoperable.
+ When the CUDA runtime and nvComp headers are present, GPU-accelerated LZ4 and
+ Snappy compression/decompression is enabled.  nvcc is not required; any C/C++
+ compiler that can find cuda_runtime_api.h and link against libcuda/libcudart and
+ the nvComp library will activate this path.  The on-disk format is identical to
+ the CPU path so encoded frames are fully interoperable.
 */
-#if defined(__CUDACC__) && __has_include("nvcomp/lz4.h") && __has_include("nvcomp/snappy.h")
+#if __has_include("cuda_runtime_api.h") && __has_include("nvcomp/lz4.h") && __has_include("nvcomp/snappy.h")
 # define HAP_USE_NVCOMP 1
 # include "cuda_runtime_api.h"
 # include "nvcomp.h"
