@@ -320,6 +320,10 @@ static unsigned int hap_limited_chunk_count_for_frame(size_t input_bytes, unsign
 #ifdef HAP_USE_NVCOMP
 /*
  Returns 1 if a CUDA-capable device is available, 0 otherwise.
+ On first success, retains and activates the primary context for device 0
+ so that subsequent Driver API calls (cuMemAlloc, cuMemcpyHtoD, …) have a
+ current context.  Using the primary context integrates safely with any
+ other library (including the CUDA Runtime and nvComp) sharing device 0.
  The result is cached after the first call.
 */
 static int hap_cuda_device_available(void)
@@ -328,7 +332,23 @@ static int hap_cuda_device_available(void)
     if (available < 0)
     {
         int count = 0;
-        available = (cuInit(0) == CUDA_SUCCESS && cuDeviceGetCount(&count) == CUDA_SUCCESS && count > 0) ? 1 : 0;
+        if (cuInit(0) == CUDA_SUCCESS &&
+            cuDeviceGetCount(&count) == CUDA_SUCCESS &&
+            count > 0)
+        {
+            CUdevice dev;
+            CUcontext ctx;
+            if (cuDeviceGet(&dev, 0) == CUDA_SUCCESS &&
+                cuDevicePrimaryCtxRetain(&ctx, dev) == CUDA_SUCCESS &&
+                cuCtxSetCurrent(ctx) == CUDA_SUCCESS)
+                available = 1;
+            else
+                available = 0;
+        }
+        else
+        {
+            available = 0;
+        }
     }
     return available;
 }
