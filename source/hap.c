@@ -374,6 +374,7 @@ static unsigned int hap_nvcomp_compress_chunks(
     void *d_out_ptrs     = NULL;
     size_t *d_in_sizes   = NULL;
     size_t *d_out_sizes  = NULL;
+    nvcompStatus_t *d_comp_statuses = NULL; /* per-chunk compression status */
 
     void **h_in_ptrs     = NULL;
     void **h_out_ptrs    = NULL;
@@ -382,20 +383,25 @@ static unsigned int hap_nvcomp_compress_chunks(
 
     size_t temp_bytes = 0;
     size_t max_comp_chunk = 0;
+    size_t max_total_uncomp = chunk_size * chunk_count;  /* size_t arithmetic; no overflow */
 
     /* Query worst-case sizes from nvComp */
     if (compressor == HapCompressorLZ4)
     {
-        nvcomp_err = nvcompBatchedLZ4CompressGetTempSize(chunk_count, chunk_size, nvcompBatchedLZ4DefaultOpts, &temp_bytes);
+        nvcomp_err = nvcompBatchedLZ4CompressGetTempSizeAsync(chunk_count, chunk_size,
+                         nvcompBatchedLZ4CompressDefaultOpts, &temp_bytes, max_total_uncomp);
         if (nvcomp_err != nvcompSuccess) goto cleanup;
-        nvcomp_err = nvcompBatchedLZ4CompressGetMaxOutputChunkSize(chunk_size, nvcompBatchedLZ4DefaultOpts, &max_comp_chunk);
+        nvcomp_err = nvcompBatchedLZ4CompressGetMaxOutputChunkSize(chunk_size,
+                         nvcompBatchedLZ4CompressDefaultOpts, &max_comp_chunk);
         if (nvcomp_err != nvcompSuccess) goto cleanup;
     }
     else
     {
-        nvcomp_err = nvcompBatchedSnappyCompressGetTempSize(chunk_count, chunk_size, nvcompBatchedSnappyDefaultOpts, &temp_bytes);
+        nvcomp_err = nvcompBatchedSnappyCompressGetTempSizeAsync(chunk_count, chunk_size,
+                         nvcompBatchedSnappyCompressDefaultOpts, &temp_bytes, max_total_uncomp);
         if (nvcomp_err != nvcompSuccess) goto cleanup;
-        nvcomp_err = nvcompBatchedSnappyCompressGetMaxOutputChunkSize(chunk_size, nvcompBatchedSnappyDefaultOpts, &max_comp_chunk);
+        nvcomp_err = nvcompBatchedSnappyCompressGetMaxOutputChunkSize(chunk_size,
+                         nvcompBatchedSnappyCompressDefaultOpts, &max_comp_chunk);
         if (nvcomp_err != nvcompSuccess) goto cleanup;
     }
 
@@ -424,6 +430,8 @@ static unsigned int hap_nvcomp_compress_chunks(
     cuda_err = cudaMalloc((void **)&d_in_sizes,  sizeof(size_t) * chunk_count);
     if (cuda_err != cudaSuccess) goto cleanup;
     cuda_err = cudaMalloc((void **)&d_out_sizes, sizeof(size_t) * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMalloc((void **)&d_comp_statuses, sizeof(nvcompStatus_t) * chunk_count);
     if (cuda_err != cudaSuccess) goto cleanup;
 
     /* Build pointer arrays */
@@ -456,7 +464,8 @@ static unsigned int hap_nvcomp_compress_chunks(
             temp_bytes,
             (void *const *)d_out_ptrs,
             d_out_sizes,
-            nvcompBatchedLZ4DefaultOpts,
+            nvcompBatchedLZ4CompressDefaultOpts,
+            d_comp_statuses,
             stream);
     }
     else
@@ -470,7 +479,8 @@ static unsigned int hap_nvcomp_compress_chunks(
             temp_bytes,
             (void *const *)d_out_ptrs,
             d_out_sizes,
-            nvcompBatchedSnappyDefaultOpts,
+            nvcompBatchedSnappyCompressDefaultOpts,
+            d_comp_statuses,
             stream);
     }
     if (nvcomp_err != nvcompSuccess) goto cleanup;
@@ -546,6 +556,7 @@ cleanup:
     if (d_out_ptrs) cudaFree(d_out_ptrs);
     if (d_in_sizes) cudaFree(d_in_sizes);
     if (d_out_sizes) cudaFree(d_out_sizes);
+    if (d_comp_statuses) cudaFree(d_comp_statuses);
 
     return result;
 }
@@ -611,12 +622,14 @@ static unsigned int hap_nvcomp_decompress_chunks(
     /* Query temp buffer size */
     if (compressor == kHapCompressorLZ4)
     {
-        nvcomp_err = nvcompBatchedLZ4DecompressGetTempSize(chunk_count, max_uncomp_chunk, &temp_bytes);
+        nvcomp_err = nvcompBatchedLZ4DecompressGetTempSizeAsync(chunk_count, max_uncomp_chunk,
+                         nvcompBatchedLZ4DecompressDefaultOpts, &temp_bytes, total_uncomp);
         if (nvcomp_err != nvcompSuccess) goto cleanup;
     }
     else
     {
-        nvcomp_err = nvcompBatchedSnappyDecompressGetTempSize(chunk_count, max_uncomp_chunk, &temp_bytes);
+        nvcomp_err = nvcompBatchedSnappyDecompressGetTempSizeAsync(chunk_count, max_uncomp_chunk,
+                         nvcompBatchedSnappyDecompressDefaultOpts, &temp_bytes, total_uncomp);
         if (nvcomp_err != nvcompSuccess) goto cleanup;
     }
 
@@ -696,6 +709,7 @@ static unsigned int hap_nvcomp_decompress_chunks(
             d_temp,
             temp_bytes,
             (void *const *)d_uncomp_ptrs,
+            nvcompBatchedLZ4DecompressDefaultOpts,
             d_statuses,
             stream);
     }
@@ -710,6 +724,7 @@ static unsigned int hap_nvcomp_decompress_chunks(
             d_temp,
             temp_bytes,
             (void *const *)d_uncomp_ptrs,
+            nvcompBatchedSnappyDecompressDefaultOpts,
             d_statuses,
             stream);
     }
