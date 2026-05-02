@@ -33,6 +33,20 @@
 #if __has_include("lz4.h")
 # include "lz4.h"
 #endif
+/*
+ When the CUDA runtime and nvComp headers are present, GPU-accelerated LZ4 and
+ Snappy compression/decompression is enabled.  nvcc is not required; any C/C++
+ compiler that can find cuda_runtime_api.h and link against libcuda/libcudart and
+ the nvComp library will activate this path.  The on-disk format is identical to
+ the CPU path so encoded frames are fully interoperable.
+*/
+#if __has_include("cuda_runtime_api.h") && __has_include("nvcomp/lz4.h") && __has_include("nvcomp/snappy.h")
+# define HAP_USE_NVCOMP 1
+# include "cuda_runtime_api.h"
+# include "nvcomp.h"
+# include "nvcomp/lz4.h"
+# include "nvcomp/snappy.h"
+#endif
 
 #define kHapUInt24Max 0x00FFFFFF
 
@@ -303,6 +317,469 @@ static unsigned int hap_limited_chunk_count_for_frame(size_t input_bytes, unsign
     return chunk_count;
 }
 
+#ifdef HAP_USE_NVCOMP
+/*
+ Returns 1 if a CUDA-capable device is available, 0 otherwise.
+ The result is cached after the first call.
+*/
+static int hap_cuda_device_available(void)
+{
+    static int available = -1;
+    if (available < 0)
+    {
+        int count = 0;
+        available = (cudaGetDeviceCount(&count) == cudaSuccess && count > 0) ? 1 : 0;
+    }
+    return available;
+}
+
+/*
+ Batch-compress chunk_count chunks of chunk_size bytes each on the GPU.
+
+ compressor    – HapCompressorLZ4 or HapCompressorSnappy
+ input         – contiguous input buffer (chunk_size * chunk_count bytes)
+ chunk_size    – size of every input chunk in bytes
+ chunk_count   – number of chunks
+ output        – destination buffer; must be large enough for all compressed chunks
+                 (for LZ4 each chunk is prefixed with a 4-byte original-size field,
+                  matching the CPU encoder format)
+ output_cap    – available bytes in output
+ comp_table    – [chunk_count] output: per-chunk second-stage compressor byte
+ size_table    – [chunk_count * 4] output: per-chunk packed size (4-byte LE)
+ total_out     – total bytes written to output
+
+ Returns HapResult_No_Error on success, or an error code if the GPU operation
+ failed (the caller should fall back to the CPU path).
+*/
+static unsigned int hap_nvcomp_compress_chunks(
+    unsigned int compressor,
+    const void *input,
+    size_t chunk_size,
+    unsigned int chunk_count,
+    void *output,
+    size_t output_cap,
+    uint8_t *comp_table,
+    void *size_table,
+    size_t *total_out)
+{
+    unsigned int result = HapResult_Internal_Error;
+    cudaError_t cuda_err;
+    nvcompStatus_t nvcomp_err;
+    cudaStream_t stream = 0;
+
+    void *d_input        = NULL;
+    void *d_comp_out     = NULL;
+    void *d_temp         = NULL;
+    void *d_in_ptrs      = NULL;   /* device array of void* — cudaMalloc requires void* */
+    void *d_out_ptrs     = NULL;
+    size_t *d_in_sizes   = NULL;
+    size_t *d_out_sizes  = NULL;
+    nvcompStatus_t *d_comp_statuses = NULL; /* per-chunk compression status */
+
+    void **h_in_ptrs     = NULL;
+    void **h_out_ptrs    = NULL;
+    size_t *h_in_sizes   = NULL;
+    size_t *h_out_sizes  = NULL;
+
+    size_t temp_bytes = 0;
+    size_t max_comp_chunk = 0;
+    size_t max_total_uncomp = chunk_size * chunk_count;  /* size_t arithmetic; no overflow */
+
+    /* Query worst-case sizes from nvComp */
+    if (compressor == HapCompressorLZ4)
+    {
+        nvcomp_err = nvcompBatchedLZ4CompressGetTempSizeAsync(chunk_count, chunk_size,
+                         nvcompBatchedLZ4CompressDefaultOpts, &temp_bytes, max_total_uncomp);
+        if (nvcomp_err != nvcompSuccess) goto cleanup;
+        nvcomp_err = nvcompBatchedLZ4CompressGetMaxOutputChunkSize(chunk_size,
+                         nvcompBatchedLZ4CompressDefaultOpts, &max_comp_chunk);
+        if (nvcomp_err != nvcompSuccess) goto cleanup;
+    }
+    else
+    {
+        nvcomp_err = nvcompBatchedSnappyCompressGetTempSizeAsync(chunk_count, chunk_size,
+                         nvcompBatchedSnappyCompressDefaultOpts, &temp_bytes, max_total_uncomp);
+        if (nvcomp_err != nvcompSuccess) goto cleanup;
+        nvcomp_err = nvcompBatchedSnappyCompressGetMaxOutputChunkSize(chunk_size,
+                         nvcompBatchedSnappyCompressDefaultOpts, &max_comp_chunk);
+        if (nvcomp_err != nvcompSuccess) goto cleanup;
+    }
+
+    /* Allocate host-side pointer / size arrays */
+    h_in_ptrs  = (void **)malloc(sizeof(void *) * chunk_count);
+    h_out_ptrs = (void **)malloc(sizeof(void *) * chunk_count);
+    h_in_sizes = (size_t *)malloc(sizeof(size_t) * chunk_count);
+    h_out_sizes = (size_t *)malloc(sizeof(size_t) * chunk_count);
+    if (!h_in_ptrs || !h_out_ptrs || !h_in_sizes || !h_out_sizes)
+        goto cleanup;
+
+    /* Allocate device memory */
+    cuda_err = cudaMalloc(&d_input, chunk_size * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMalloc(&d_comp_out, max_comp_chunk * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    if (temp_bytes > 0)
+    {
+        cuda_err = cudaMalloc(&d_temp, temp_bytes);
+        if (cuda_err != cudaSuccess) goto cleanup;
+    }
+    cuda_err = cudaMalloc(&d_in_ptrs,  sizeof(void *) * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMalloc(&d_out_ptrs, sizeof(void *) * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMalloc((void **)&d_in_sizes,  sizeof(size_t) * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMalloc((void **)&d_out_sizes, sizeof(size_t) * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMalloc((void **)&d_comp_statuses, sizeof(nvcompStatus_t) * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+
+    /* Build pointer arrays */
+    for (unsigned int i = 0; i < chunk_count; i++)
+    {
+        h_in_ptrs[i]  = (char *)d_input    + chunk_size     * i;
+        h_out_ptrs[i] = (char *)d_comp_out + max_comp_chunk * i;
+        h_in_sizes[i] = chunk_size;
+    }
+
+    /* Upload input and metadata to device */
+    cuda_err = cudaMemcpy(d_input,    input,       chunk_size * chunk_count,        cudaMemcpyHostToDevice);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMemcpy(d_in_ptrs,  h_in_ptrs,  sizeof(void *) * chunk_count,   cudaMemcpyHostToDevice);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMemcpy(d_out_ptrs, h_out_ptrs, sizeof(void *) * chunk_count,   cudaMemcpyHostToDevice);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMemcpy(d_in_sizes, h_in_sizes, sizeof(size_t) * chunk_count,   cudaMemcpyHostToDevice);
+    if (cuda_err != cudaSuccess) goto cleanup;
+
+    /* GPU batch compression */
+    if (compressor == HapCompressorLZ4)
+    {
+        nvcomp_err = nvcompBatchedLZ4CompressAsync(
+            (const void * const *)d_in_ptrs,
+            (const size_t *)d_in_sizes,
+            chunk_size,
+            chunk_count,
+            d_temp,
+            temp_bytes,
+            (void *const *)d_out_ptrs,
+            d_out_sizes,
+            nvcompBatchedLZ4CompressDefaultOpts,
+            d_comp_statuses,
+            stream);
+    }
+    else
+    {
+        nvcomp_err = nvcompBatchedSnappyCompressAsync(
+            (const void * const *)d_in_ptrs,
+            (const size_t *)d_in_sizes,
+            chunk_size,
+            chunk_count,
+            d_temp,
+            temp_bytes,
+            (void *const *)d_out_ptrs,
+            d_out_sizes,
+            nvcompBatchedSnappyCompressDefaultOpts,
+            d_comp_statuses,
+            stream);
+    }
+    if (nvcomp_err != nvcompSuccess) goto cleanup;
+
+    cuda_err = cudaStreamSynchronize(stream);
+    if (cuda_err != cudaSuccess) goto cleanup;
+
+    /* Retrieve compressed sizes */
+    cuda_err = cudaMemcpy(h_out_sizes, d_out_sizes, sizeof(size_t) * chunk_count, cudaMemcpyDeviceToHost);
+    if (cuda_err != cudaSuccess) goto cleanup;
+
+    /* Copy compressed chunks to output, writing LZ4 4-byte prefix where needed */
+    {
+        char *out_ptr = (char *)output;
+        size_t written = 0;
+        for (unsigned int i = 0; i < chunk_count; i++)
+        {
+            size_t comp_size = h_out_sizes[i];
+            size_t prefix = (compressor == HapCompressorLZ4) ? 4 : 0;
+            size_t chunk_total = comp_size + prefix;
+
+            if (chunk_total >= chunk_size)
+            {
+                /* Compressed is not smaller; store this chunk uncompressed */
+                if (written + chunk_size > output_cap)
+                    goto cleanup;
+                cuda_err = cudaMemcpy(out_ptr,
+                                      (char *)d_input + chunk_size * i,
+                                      chunk_size,
+                                      cudaMemcpyDeviceToHost);
+                if (cuda_err != cudaSuccess) goto cleanup;
+                comp_table[i] = kHapCompressorNone;
+                hap_write_4_byte_uint((uint8_t *)size_table + i * 4, (unsigned int)chunk_size);
+                out_ptr += chunk_size;
+                written += chunk_size;
+            }
+            else
+            {
+                if (written + chunk_total > output_cap)
+                    goto cleanup;
+                if (prefix)
+                {
+                    hap_write_4_byte_uint(out_ptr, (unsigned int)chunk_size);
+                    out_ptr += 4;
+                }
+                cuda_err = cudaMemcpy(out_ptr,
+                                      (char *)d_comp_out + max_comp_chunk * i,
+                                      comp_size,
+                                      cudaMemcpyDeviceToHost);
+                if (cuda_err != cudaSuccess) goto cleanup;
+                comp_table[i] = (compressor == HapCompressorLZ4)
+                                 ? kHapCompressorLZ4
+                                 : kHapCompressorSnappy;
+                hap_write_4_byte_uint((uint8_t *)size_table + i * 4, (unsigned int)chunk_total);
+                out_ptr += comp_size;
+                written += chunk_total;
+            }
+        }
+        *total_out = written;
+    }
+
+    result = HapResult_No_Error;
+
+cleanup:
+    free(h_in_ptrs);
+    free(h_out_ptrs);
+    free(h_in_sizes);
+    free(h_out_sizes);
+    if (d_input)    cudaFree(d_input);
+    if (d_comp_out) cudaFree(d_comp_out);
+    if (d_temp)     cudaFree(d_temp);
+    if (d_in_ptrs)  cudaFree(d_in_ptrs);
+    if (d_out_ptrs) cudaFree(d_out_ptrs);
+    if (d_in_sizes) cudaFree(d_in_sizes);
+    if (d_out_sizes) cudaFree(d_out_sizes);
+    if (d_comp_statuses) cudaFree(d_comp_statuses);
+
+    return result;
+}
+
+/*
+ Batch-decompress chunk_count chunks on the GPU, filling in each
+ chunks[i].uncompressed_chunk_data and setting chunks[i].result.
+
+ compressor  – kHapCompressorLZ4 or kHapCompressorSnappy
+               (must be uniform across all elements of chunks[])
+
+ For LZ4 chunks: compressed_chunk_data points to [4-byte original_size][lz4 data]
+                 and compressed_chunk_size includes the 4-byte prefix.
+                 uncompressed_chunk_size must already be set (from the prefix).
+ For Snappy chunks: compressed_chunk_data/size are the raw snappy stream.
+                    uncompressed_chunk_size must already be set.
+
+ Returns HapResult_No_Error if all chunks were decompressed successfully.
+ On any GPU failure the function returns an error and leaves chunks[].result
+ untouched so the caller can fall back to the CPU path.
+*/
+static unsigned int hap_nvcomp_decompress_chunks(
+    unsigned int compressor,
+    HapChunkDecodeInfo *chunks,
+    unsigned int chunk_count)
+{
+    unsigned int result = HapResult_Internal_Error;
+    cudaError_t cuda_err;
+    nvcompStatus_t nvcomp_err;
+    cudaStream_t stream = 0;
+
+    size_t prefix = (compressor == kHapCompressorLZ4) ? 4 : 0;
+
+    void *d_comp    = NULL;
+    void *d_uncomp  = NULL;
+    void *d_temp    = NULL;
+    void *d_comp_ptrs    = NULL;   /* device array of void* — cudaMalloc requires void* */
+    void *d_uncomp_ptrs  = NULL;
+    size_t *d_comp_sizes   = NULL;
+    size_t *d_uncomp_sizes = NULL;
+    nvcompStatus_t *d_statuses          = NULL;
+    size_t         *d_actual_uncomp_sizes = NULL;
+
+    void   **h_comp_ptrs   = NULL;
+    void   **h_uncomp_ptrs = NULL;
+    size_t  *h_comp_sizes  = NULL;
+    size_t  *h_uncomp_sizes = NULL;
+    nvcompStatus_t *h_statuses = NULL;
+
+    size_t total_comp   = 0;
+    size_t total_uncomp = 0;
+    size_t max_uncomp_chunk = 0;
+    size_t temp_bytes = 0;
+
+    for (unsigned int i = 0; i < chunk_count; i++)
+    {
+        total_comp   += chunks[i].compressed_chunk_size - prefix;
+        total_uncomp += chunks[i].uncompressed_chunk_size;
+        if (chunks[i].uncompressed_chunk_size > max_uncomp_chunk)
+            max_uncomp_chunk = chunks[i].uncompressed_chunk_size;
+    }
+
+    /* Query temp buffer size */
+    if (compressor == kHapCompressorLZ4)
+    {
+        nvcomp_err = nvcompBatchedLZ4DecompressGetTempSizeAsync(chunk_count, max_uncomp_chunk,
+                         nvcompBatchedLZ4DecompressDefaultOpts, &temp_bytes, total_uncomp);
+        if (nvcomp_err != nvcompSuccess) goto cleanup;
+    }
+    else
+    {
+        nvcomp_err = nvcompBatchedSnappyDecompressGetTempSizeAsync(chunk_count, max_uncomp_chunk,
+                         nvcompBatchedSnappyDecompressDefaultOpts, &temp_bytes, total_uncomp);
+        if (nvcomp_err != nvcompSuccess) goto cleanup;
+    }
+
+    /* Allocate host arrays */
+    h_comp_ptrs   = (void **)malloc(sizeof(void *) * chunk_count);
+    h_uncomp_ptrs = (void **)malloc(sizeof(void *) * chunk_count);
+    h_comp_sizes  = (size_t *)malloc(sizeof(size_t) * chunk_count);
+    h_uncomp_sizes = (size_t *)malloc(sizeof(size_t) * chunk_count);
+    h_statuses    = (nvcompStatus_t *)malloc(sizeof(nvcompStatus_t) * chunk_count);
+    if (!h_comp_ptrs || !h_uncomp_ptrs || !h_comp_sizes || !h_uncomp_sizes || !h_statuses)
+        goto cleanup;
+
+    /* Allocate device memory */
+    cuda_err = cudaMalloc(&d_comp,   total_comp);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMalloc(&d_uncomp, total_uncomp);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    if (temp_bytes > 0)
+    {
+        cuda_err = cudaMalloc(&d_temp, temp_bytes);
+        if (cuda_err != cudaSuccess) goto cleanup;
+    }
+    cuda_err = cudaMalloc(&d_comp_ptrs,   sizeof(void *) * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMalloc(&d_uncomp_ptrs, sizeof(void *) * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMalloc((void **)&d_comp_sizes,   sizeof(size_t) * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMalloc((void **)&d_uncomp_sizes, sizeof(size_t) * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMalloc((void **)&d_statuses,          sizeof(nvcompStatus_t) * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMalloc((void **)&d_actual_uncomp_sizes, sizeof(size_t) * chunk_count);
+    if (cuda_err != cudaSuccess) goto cleanup;
+
+    /* Upload compressed data and build pointer arrays */
+    {
+        size_t comp_off   = 0;
+        size_t uncomp_off = 0;
+        for (unsigned int i = 0; i < chunk_count; i++)
+        {
+            size_t actual_comp = chunks[i].compressed_chunk_size - prefix;
+            cuda_err = cudaMemcpy((char *)d_comp + comp_off,
+                                  chunks[i].compressed_chunk_data + prefix,
+                                  actual_comp,
+                                  cudaMemcpyHostToDevice);
+            if (cuda_err != cudaSuccess) goto cleanup;
+
+            h_comp_ptrs[i]   = (char *)d_comp   + comp_off;
+            h_uncomp_ptrs[i] = (char *)d_uncomp + uncomp_off;
+            h_comp_sizes[i]  = actual_comp;
+            h_uncomp_sizes[i] = chunks[i].uncompressed_chunk_size;
+
+            comp_off   += actual_comp;
+            uncomp_off += chunks[i].uncompressed_chunk_size;
+        }
+    }
+
+    cuda_err = cudaMemcpy(d_comp_ptrs,   h_comp_ptrs,   sizeof(void *) * chunk_count, cudaMemcpyHostToDevice);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMemcpy(d_uncomp_ptrs, h_uncomp_ptrs, sizeof(void *) * chunk_count, cudaMemcpyHostToDevice);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMemcpy(d_comp_sizes,   h_comp_sizes,  sizeof(size_t) * chunk_count, cudaMemcpyHostToDevice);
+    if (cuda_err != cudaSuccess) goto cleanup;
+    cuda_err = cudaMemcpy(d_uncomp_sizes, h_uncomp_sizes, sizeof(size_t) * chunk_count, cudaMemcpyHostToDevice);
+    if (cuda_err != cudaSuccess) goto cleanup;
+
+    /* GPU batch decompression */
+    if (compressor == kHapCompressorLZ4)
+    {
+        nvcomp_err = nvcompBatchedLZ4DecompressAsync(
+            (const void * const *)d_comp_ptrs,
+            (const size_t *)d_comp_sizes,
+            (const size_t *)d_uncomp_sizes,
+            d_actual_uncomp_sizes,
+            chunk_count,
+            d_temp,
+            temp_bytes,
+            (void *const *)d_uncomp_ptrs,
+            nvcompBatchedLZ4DecompressDefaultOpts,
+            d_statuses,
+            stream);
+    }
+    else
+    {
+        nvcomp_err = nvcompBatchedSnappyDecompressAsync(
+            (const void * const *)d_comp_ptrs,
+            (const size_t *)d_comp_sizes,
+            (const size_t *)d_uncomp_sizes,
+            d_actual_uncomp_sizes,
+            chunk_count,
+            d_temp,
+            temp_bytes,
+            (void *const *)d_uncomp_ptrs,
+            nvcompBatchedSnappyDecompressDefaultOpts,
+            d_statuses,
+            stream);
+    }
+    if (nvcomp_err != nvcompSuccess) goto cleanup;
+
+    cuda_err = cudaStreamSynchronize(stream);
+    if (cuda_err != cudaSuccess) goto cleanup;
+
+    /* Check per-chunk statuses */
+    cuda_err = cudaMemcpy(h_statuses, d_statuses, sizeof(nvcompStatus_t) * chunk_count, cudaMemcpyDeviceToHost);
+    if (cuda_err != cudaSuccess) goto cleanup;
+
+    for (unsigned int i = 0; i < chunk_count; i++)
+    {
+        if (h_statuses[i] != nvcompSuccess)
+            goto cleanup;
+    }
+
+    /* Copy decompressed data back to the caller's output buffers */
+    {
+        size_t uncomp_off = 0;
+        for (unsigned int i = 0; i < chunk_count; i++)
+        {
+            cuda_err = cudaMemcpy(chunks[i].uncompressed_chunk_data,
+                                  (char *)d_uncomp + uncomp_off,
+                                  chunks[i].uncompressed_chunk_size,
+                                  cudaMemcpyDeviceToHost);
+            if (cuda_err != cudaSuccess) goto cleanup;
+            chunks[i].result = HapResult_No_Error;
+            uncomp_off += chunks[i].uncompressed_chunk_size;
+        }
+    }
+
+    result = HapResult_No_Error;
+
+cleanup:
+    free(h_comp_ptrs);
+    free(h_uncomp_ptrs);
+    free(h_comp_sizes);
+    free(h_uncomp_sizes);
+    free(h_statuses);
+    if (d_comp)              cudaFree(d_comp);
+    if (d_uncomp)            cudaFree(d_uncomp);
+    if (d_temp)              cudaFree(d_temp);
+    if (d_comp_ptrs)         cudaFree(d_comp_ptrs);
+    if (d_uncomp_ptrs)       cudaFree(d_uncomp_ptrs);
+    if (d_comp_sizes)        cudaFree(d_comp_sizes);
+    if (d_uncomp_sizes)      cudaFree(d_uncomp_sizes);
+    if (d_statuses)          cudaFree(d_statuses);
+    if (d_actual_uncomp_sizes) cudaFree(d_actual_uncomp_sizes);
+
+    return result;
+}
+#endif /* HAP_USE_NVCOMP */
+
 static size_t hap_max_encoded_length(size_t input_bytes, unsigned int texture_format, unsigned int compressor, unsigned int chunk_count)
 {
     size_t decode_instructions_length, max_compressed_length;
@@ -468,6 +945,29 @@ static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long in
 
         top_section_length = 4 + decode_instructions_length;
 
+#ifdef HAP_USE_NVCOMP
+        if (hap_cuda_device_available())
+        {
+            size_t gpu_written = 0;
+            unsigned int gpu_result = hap_nvcomp_compress_chunks(
+                compressor,
+                inputBuffer,
+                chunk_size,
+                chunkCount,
+                compressed_data,
+                compress_buffer_remaining,
+                second_stage_compressor_table,
+                chunk_size_table,
+                &gpu_written);
+            if (gpu_result == HapResult_No_Error)
+            {
+                top_section_length += gpu_written;
+                goto done_compressing;
+            }
+            /* GPU path failed; fall through to CPU path below */
+        }
+#endif /* HAP_USE_NVCOMP */
+
         for (i = 0; i < chunkCount; i++) {
             size_t chunk_packed_length = compress_buffer_remaining;
             const char *chunk_input_start = (const char *)(((uint8_t *)inputBuffer) + (chunk_size * i));
@@ -522,6 +1022,10 @@ static unsigned int hap_encode_texture(const void *inputBuffer, unsigned long in
             top_section_length += chunk_packed_length;
             compress_buffer_remaining -= chunk_packed_length;
         }
+
+#ifdef HAP_USE_NVCOMP
+done_compressing:;
+#endif
 
         if (top_section_length < inputBufferBytes + top_section_header_length)
         {
@@ -944,6 +1448,29 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
                  */
                 bytesUsed = running_uncompressed_chunk_size;
 
+#ifdef HAP_USE_NVCOMP
+                /* If all chunks share the same GPU-acceleratable compressor, batch-decompress
+                   on the GPU.  Fall back to the CPU path on any GPU failure. */
+                {
+                    int all_same = (chunk_count > 0);
+                    unsigned int first_comp = all_same ? chunk_info[0].compressor : 0;
+                    if (first_comp != kHapCompressorLZ4 && first_comp != kHapCompressorSnappy)
+                        all_same = 0;
+                    for (int ci = 1; ci < chunk_count && all_same; ci++)
+                    {
+                        if (chunk_info[ci].compressor != first_comp)
+                            all_same = 0;
+                    }
+
+                    if (all_same && hap_cuda_device_available() &&
+                        hap_nvcomp_decompress_chunks(first_comp, chunk_info, chunk_count) == HapResult_No_Error)
+                    {
+                        /* GPU decompression succeeded; chunk_info[].result already set */
+                        goto check_chunk_results;
+                    }
+                }
+#endif /* HAP_USE_NVCOMP */
+
                 if (chunk_count == 1)
                 {
                     /*
@@ -956,6 +1483,9 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
                     callback((HapDecodeWorkFunction)hap_decode_chunk, chunk_info, chunk_count, info);
                 }
 
+#ifdef HAP_USE_NVCOMP
+check_chunk_results:;
+#endif
                 /*
                  Check to see if we encountered any errors and report one of them
                  */
@@ -996,6 +1526,20 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
         {
             return HapResult_Buffer_Too_Small;
         }
+#ifdef HAP_USE_NVCOMP
+        if (hap_cuda_device_available())
+        {
+            HapChunkDecodeInfo chunk = {0};
+            chunk.compressor            = kHapCompressorSnappy;
+            chunk.compressed_chunk_data = (const char *)texture_section;
+            chunk.compressed_chunk_size = texture_section_length;
+            chunk.uncompressed_chunk_data = (char *)outputBuffer;
+            chunk.uncompressed_chunk_size = bytesUsed;
+            if (hap_nvcomp_decompress_chunks(kHapCompressorSnappy, &chunk, 1) == HapResult_No_Error)
+                goto end;
+            /* GPU failed; fall through to CPU */
+        }
+#endif /* HAP_USE_NVCOMP */
         snappy_result = snappy_uncompress((const char *)texture_section, texture_section_length, (char *)outputBuffer, &bytesUsed);
         if (snappy_result != SNAPPY_OK)
         {
@@ -1015,6 +1559,20 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
         {
             return HapResult_Buffer_Too_Small;
         }
+#ifdef HAP_USE_NVCOMP
+        if (hap_cuda_device_available())
+        {
+            HapChunkDecodeInfo chunk = {0};
+            chunk.compressor            = kHapCompressorLZ4;
+            chunk.compressed_chunk_data = (const char *)texture_section;
+            chunk.compressed_chunk_size = texture_section_length;
+            chunk.uncompressed_chunk_data = (char *)outputBuffer;
+            chunk.uncompressed_chunk_size = bytesUsed;
+            if (hap_nvcomp_decompress_chunks(kHapCompressorLZ4, &chunk, 1) == HapResult_No_Error)
+                goto end;
+            /* GPU failed; fall through to CPU */
+        }
+#endif /* HAP_USE_NVCOMP */
         int lz4_result = LZ4_decompress_safe((const char*)texture_section + 4, (char*)outputBuffer,
                                              texture_section_length - 4, outputBufferBytes);
         if (lz4_result <= 0)
