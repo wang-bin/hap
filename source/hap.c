@@ -62,24 +62,31 @@
  RGB_DXT1                   None            0xAB
  RGB_DXT1                   Snappy          0xBB
  RGB_DXT1                   Complex         0xCB
+ RGB_DXT1                   LZ4             0xDB
  RGBA_DXT5                  None            0xAE
  RGBA_DXT5                  Snappy          0xBE
  RGBA_DXT5                  Complex         0xCE
+ RGBA_DXT5                  LZ4             0xDE
  YCoCg_DXT5                 None            0xAF
  YCoCg_DXT5                 Snappy          0xBF
  YCoCg_DXT5                 Complex         0xCF
+ YCoCg_DXT5                 LZ4             0xDF
  A_RGTC1                    None            0xA1
  A_RGTC1                    Snappy          0xB1
  A_RGTC1                    Complex         0xC1
+ A_RGTC1                    LZ4             0xC1
  RGBA_BPTC_UNORM            None            0xAC
  RGBA_BPTC_UNORM            Snappy          0xBC
  RGBA_BPTC_UNORM            Complex         0xCC
+ RGBA_BPTC_UNORM            LZ4             0xDC
  RGB_BPTC_UNSIGNED_FLOAT    None            0xA2
  RGB_BPTC_UNSIGNED_FLOAT    Snappy          0xB2
  RGB_BPTC_UNSIGNED_FLOAT    Complex         0xC2
+ RGB_BPTC_UNSIGNED_FLOAT    LZ4             0xD2
  RGB_BPTC_SIGNED_FLOAT      None            0xA3
  RGB_BPTC_SIGNED_FLOAT      Snappy          0xB3
  RGB_BPTC_SIGNED_FLOAT      Complex         0xC3
+ RGB_BPTC_SIGNED_FLOAT      LZ4             0xD3
  */
 
 /*
