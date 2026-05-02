@@ -370,8 +370,8 @@ static unsigned int hap_nvcomp_compress_chunks(
     void *d_input        = NULL;
     void *d_comp_out     = NULL;
     void *d_temp         = NULL;
-    void **d_in_ptrs     = NULL;
-    void **d_out_ptrs    = NULL;
+    void *d_in_ptrs      = NULL;   /* device array of void* — cudaMalloc requires void* */
+    void *d_out_ptrs     = NULL;
     size_t *d_in_sizes   = NULL;
     size_t *d_out_sizes  = NULL;
 
@@ -386,18 +386,16 @@ static unsigned int hap_nvcomp_compress_chunks(
     /* Query worst-case sizes from nvComp */
     if (compressor == HapCompressorLZ4)
     {
-        nvcompBatchedLZ4Opts_t opts = {NVCOMP_TYPE_CHAR};
-        nvcomp_err = nvcompBatchedLZ4CompressGetTempSize(chunk_count, chunk_size, opts, &temp_bytes);
+        nvcomp_err = nvcompBatchedLZ4CompressGetTempSize(chunk_count, chunk_size, nvcompBatchedLZ4DefaultOpts, &temp_bytes);
         if (nvcomp_err != nvcompSuccess) goto cleanup;
-        nvcomp_err = nvcompBatchedLZ4CompressGetMaxOutputChunkSize(chunk_size, opts, &max_comp_chunk);
+        nvcomp_err = nvcompBatchedLZ4CompressGetMaxOutputChunkSize(chunk_size, nvcompBatchedLZ4DefaultOpts, &max_comp_chunk);
         if (nvcomp_err != nvcompSuccess) goto cleanup;
     }
     else
     {
-        nvcompBatchedSnappyOpts_t opts = {};
-        nvcomp_err = nvcompBatchedSnappyCompressGetTempSize(chunk_count, chunk_size, opts, &temp_bytes);
+        nvcomp_err = nvcompBatchedSnappyCompressGetTempSize(chunk_count, chunk_size, nvcompBatchedSnappyDefaultOpts, &temp_bytes);
         if (nvcomp_err != nvcompSuccess) goto cleanup;
-        nvcomp_err = nvcompBatchedSnappyCompressGetMaxOutputChunkSize(chunk_size, opts, &max_comp_chunk);
+        nvcomp_err = nvcompBatchedSnappyCompressGetMaxOutputChunkSize(chunk_size, nvcompBatchedSnappyDefaultOpts, &max_comp_chunk);
         if (nvcomp_err != nvcompSuccess) goto cleanup;
     }
 
@@ -423,9 +421,9 @@ static unsigned int hap_nvcomp_compress_chunks(
     if (cuda_err != cudaSuccess) goto cleanup;
     cuda_err = cudaMalloc(&d_out_ptrs, sizeof(void *) * chunk_count);
     if (cuda_err != cudaSuccess) goto cleanup;
-    cuda_err = cudaMalloc(&d_in_sizes,  sizeof(size_t) * chunk_count);
+    cuda_err = cudaMalloc((void **)&d_in_sizes,  sizeof(size_t) * chunk_count);
     if (cuda_err != cudaSuccess) goto cleanup;
-    cuda_err = cudaMalloc(&d_out_sizes, sizeof(size_t) * chunk_count);
+    cuda_err = cudaMalloc((void **)&d_out_sizes, sizeof(size_t) * chunk_count);
     if (cuda_err != cudaSuccess) goto cleanup;
 
     /* Build pointer arrays */
@@ -449,7 +447,6 @@ static unsigned int hap_nvcomp_compress_chunks(
     /* GPU batch compression */
     if (compressor == HapCompressorLZ4)
     {
-        nvcompBatchedLZ4Opts_t opts = {NVCOMP_TYPE_CHAR};
         nvcomp_err = nvcompBatchedLZ4CompressAsync(
             (const void * const *)d_in_ptrs,
             (const size_t *)d_in_sizes,
@@ -457,14 +454,13 @@ static unsigned int hap_nvcomp_compress_chunks(
             chunk_count,
             d_temp,
             temp_bytes,
-            d_out_ptrs,
+            (void *const *)d_out_ptrs,
             d_out_sizes,
-            opts,
+            nvcompBatchedLZ4DefaultOpts,
             stream);
     }
     else
     {
-        nvcompBatchedSnappyOpts_t opts = {};
         nvcomp_err = nvcompBatchedSnappyCompressAsync(
             (const void * const *)d_in_ptrs,
             (const size_t *)d_in_sizes,
@@ -472,9 +468,9 @@ static unsigned int hap_nvcomp_compress_chunks(
             chunk_count,
             d_temp,
             temp_bytes,
-            d_out_ptrs,
+            (void *const *)d_out_ptrs,
             d_out_sizes,
-            opts,
+            nvcompBatchedSnappyDefaultOpts,
             stream);
     }
     if (nvcomp_err != nvcompSuccess) goto cleanup;
@@ -586,8 +582,8 @@ static unsigned int hap_nvcomp_decompress_chunks(
     void *d_comp    = NULL;
     void *d_uncomp  = NULL;
     void *d_temp    = NULL;
-    void **d_comp_ptrs   = NULL;
-    void **d_uncomp_ptrs = NULL;
+    void *d_comp_ptrs    = NULL;   /* device array of void* — cudaMalloc requires void* */
+    void *d_uncomp_ptrs  = NULL;
     size_t *d_comp_sizes   = NULL;
     size_t *d_uncomp_sizes = NULL;
     nvcompStatus_t *d_statuses          = NULL;
@@ -647,13 +643,13 @@ static unsigned int hap_nvcomp_decompress_chunks(
     if (cuda_err != cudaSuccess) goto cleanup;
     cuda_err = cudaMalloc(&d_uncomp_ptrs, sizeof(void *) * chunk_count);
     if (cuda_err != cudaSuccess) goto cleanup;
-    cuda_err = cudaMalloc(&d_comp_sizes,   sizeof(size_t) * chunk_count);
+    cuda_err = cudaMalloc((void **)&d_comp_sizes,   sizeof(size_t) * chunk_count);
     if (cuda_err != cudaSuccess) goto cleanup;
-    cuda_err = cudaMalloc(&d_uncomp_sizes, sizeof(size_t) * chunk_count);
+    cuda_err = cudaMalloc((void **)&d_uncomp_sizes, sizeof(size_t) * chunk_count);
     if (cuda_err != cudaSuccess) goto cleanup;
-    cuda_err = cudaMalloc(&d_statuses,          sizeof(nvcompStatus_t) * chunk_count);
+    cuda_err = cudaMalloc((void **)&d_statuses,          sizeof(nvcompStatus_t) * chunk_count);
     if (cuda_err != cudaSuccess) goto cleanup;
-    cuda_err = cudaMalloc(&d_actual_uncomp_sizes, sizeof(size_t) * chunk_count);
+    cuda_err = cudaMalloc((void **)&d_actual_uncomp_sizes, sizeof(size_t) * chunk_count);
     if (cuda_err != cudaSuccess) goto cleanup;
 
     /* Upload compressed data and build pointer arrays */
@@ -699,7 +695,7 @@ static unsigned int hap_nvcomp_decompress_chunks(
             chunk_count,
             d_temp,
             temp_bytes,
-            d_uncomp_ptrs,
+            (void *const *)d_uncomp_ptrs,
             d_statuses,
             stream);
     }
@@ -713,7 +709,7 @@ static unsigned int hap_nvcomp_decompress_chunks(
             chunk_count,
             d_temp,
             temp_bytes,
-            d_uncomp_ptrs,
+            (void *const *)d_uncomp_ptrs,
             d_statuses,
             stream);
     }
