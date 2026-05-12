@@ -210,8 +210,8 @@ unsigned long HapYCbCrPlaneByteSize(unsigned int width, unsigned int height,
    3. Optionally downsample Cb/Cr according to subsampling.
    4. Encode each plane to BC4/RGTC1.
 
- When a CUDA device is available the conversion is performed on the GPU via
- the CUDA driver API; otherwise a CPU fallback is used.
+ Backend selection priority: WebGPU (when compiled with -DHAVE_WEBGPU),
+ then CUDA (when compiled with -DHAVE_CUDA), then a CPU fallback.
 
  inputBuffer        BC-compressed source texture data.
  inputBufferBytes   Size of inputBuffer in bytes.
