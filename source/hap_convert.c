@@ -664,6 +664,9 @@ unsigned int HapConvertTextureRGBToYCbCr(
     void         *outputCb,      unsigned long  outputCbBytes, unsigned long *outputCbBytesUsed,
     void         *outputCr,      unsigned long  outputCrBytes, unsigned long *outputCrBytesUsed)
 {
+    unsigned int cb_w, cb_h;
+    int backend_ok = 0;
+
     /* Validate arguments */
     if (!inputBuffer || !outputY || !outputCb || !outputCr
         || !outputYBytesUsed || !outputCbBytesUsed || !outputCrBytesUsed)
@@ -683,43 +686,37 @@ unsigned int HapConvertTextureRGBToYCbCr(
         return HapResult_Bad_Arguments;
     if (subsampling == HapYCbCrSubsampling_420 && height % 8 != 0)
         return HapResult_Bad_Arguments;
+    hap_chroma_plane_dims(width, height, subsampling, &cb_w, &cb_h);
 
 #ifdef HAVE_WEBGPU
     if (hap_wgpu_available()) {
-        unsigned int cb_w, cb_h;
-        hap_chroma_plane_dims(width, height, subsampling, &cb_w, &cb_h);
         int ok = hap_wgpu_convert_rgb_to_ycbcr(
             inputBuffer, inputBufferBytes, inputTextureFormat,
             width, height, subsampling,
             outputY, outputCb, outputCr,
             outputYBytes, outputCbBytes, outputCrBytes);
-        if (ok) {
-            *outputYBytesUsed  = hap_bc4_plane_bytes(width, height);
-            *outputCbBytesUsed = hap_bc4_plane_bytes(cb_w, cb_h);
-            *outputCrBytesUsed = hap_bc4_plane_bytes(cb_w, cb_h);
-            return HapResult_No_Error;
-        }
+        if (ok) backend_ok = 1;
     }
 #endif
 
 #ifdef HAVE_CUDA
-    if (hap_cuda_available()) {
-        unsigned int cb_w, cb_h;
-        hap_chroma_plane_dims(width, height, subsampling, &cb_w, &cb_h);
+    if (!backend_ok && hap_cuda_available()) {
         int ok = hap_cuda_convert_rgb_to_ycbcr(
             inputBuffer, inputBufferBytes, inputTextureFormat,
             width, height, subsampling,
             outputY, outputCb, outputCr,
             outputYBytes, outputCbBytes, outputCrBytes);
-        if (ok) {
-            *outputYBytesUsed  = hap_bc4_plane_bytes(width, height);
-            *outputCbBytesUsed = hap_bc4_plane_bytes(cb_w, cb_h);
-            *outputCrBytesUsed = hap_bc4_plane_bytes(cb_w, cb_h);
-            return HapResult_No_Error;
-        }
+        if (ok) backend_ok = 1;
         /* Fall through to CPU path if CUDA conversion fails */
     }
 #endif
+
+    if (backend_ok) {
+        *outputYBytesUsed  = hap_bc4_plane_bytes(width, height);
+        *outputCbBytesUsed = hap_bc4_plane_bytes(cb_w, cb_h);
+        *outputCrBytesUsed = hap_bc4_plane_bytes(cb_w, cb_h);
+        return HapResult_No_Error;
+    }
 
     return cpu_convert_rgb_to_ycbcr(
         inputBuffer, inputBufferBytes, inputTextureFormat,
@@ -739,6 +736,9 @@ unsigned int HapConvertTextureYCbCrToRGB(
     void         *outputBuffer,  unsigned long  outputBufferBytes,
     unsigned long *outputBufferBytesUsed)
 {
+    unsigned long out_bytes = hap_bc_plane_bytes(width, height, outputTextureFormat);
+    int backend_ok = 0;
+
     if (!inputY || !inputCb || !inputCr || !outputBuffer || !outputBufferBytesUsed)
         return HapResult_Bad_Arguments;
     if (width == 0 || height == 0 || width % 4 != 0 || height % 4 != 0)
@@ -757,25 +757,24 @@ unsigned int HapConvertTextureYCbCrToRGB(
             inputY, inputYBytes, inputCb, inputCbBytes, inputCr, inputCrBytes,
             subsampling, width, height, outputTextureFormat,
             outputBuffer, outputBufferBytes);
-        if (ok) {
-            *outputBufferBytesUsed = hap_bc_plane_bytes(width, height, outputTextureFormat);
-            return HapResult_No_Error;
-        }
+        if (ok) backend_ok = 1;
     }
 #endif
 
 #ifdef HAVE_CUDA
-    if (hap_cuda_available()) {
+    if (!backend_ok && hap_cuda_available()) {
         int ok = hap_cuda_convert_ycbcr_to_rgb(
             inputY, inputYBytes, inputCb, inputCbBytes, inputCr, inputCrBytes,
             subsampling, width, height, outputTextureFormat,
             outputBuffer, outputBufferBytes);
-        if (ok) {
-            *outputBufferBytesUsed = hap_bc_plane_bytes(width, height, outputTextureFormat);
-            return HapResult_No_Error;
-        }
+        if (ok) backend_ok = 1;
     }
 #endif
+
+    if (backend_ok) {
+        *outputBufferBytesUsed = out_bytes;
+        return HapResult_No_Error;
+    }
 
     return cpu_convert_ycbcr_to_rgb(
         inputY, inputYBytes, inputCb, inputCbBytes, inputCr, inputCrBytes,
