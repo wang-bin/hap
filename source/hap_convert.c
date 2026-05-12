@@ -9,15 +9,20 @@
    HapConvertTextureRGBToYCbCr()
    HapConvertTextureYCbCrToRGB()
 
- When compiled with -DHAVE_CUDA the CUDA driver API backend
- (hap_convert_cuda.c) is tried first; on failure or absence the CPU path
- below is used as a fallback.
+ When compiled with -DHAVE_WEBGPU, the WebGPU C API + WGSL compute backend
+ (hap_convert_wgpu.c) is tried first.  When compiled with -DHAVE_CUDA, the
+ CUDA driver API backend (hap_convert_cuda.c) is then tried.  On failure or
+ absence, the CPU path below is used as a fallback.
 
  Colour space: BT.709 full-range (0-255 for both luma and chroma).
  */
 
 #include "hap_convert.h"
 #include "hap.h"
+
+#ifdef HAVE_WEBGPU
+#  include "hap_convert_wgpu.h"
+#endif
 
 #ifdef HAVE_CUDA
 #  include "hap_convert_cuda.h"
@@ -679,6 +684,24 @@ unsigned int HapConvertTextureRGBToYCbCr(
     if (subsampling == HapYCbCrSubsampling_420 && height % 8 != 0)
         return HapResult_Bad_Arguments;
 
+#ifdef HAVE_WEBGPU
+    if (hap_wgpu_available()) {
+        unsigned int cb_w, cb_h;
+        hap_chroma_plane_dims(width, height, subsampling, &cb_w, &cb_h);
+        int ok = hap_wgpu_convert_rgb_to_ycbcr(
+            inputBuffer, inputBufferBytes, inputTextureFormat,
+            width, height, subsampling,
+            outputY, outputCb, outputCr,
+            outputYBytes, outputCbBytes, outputCrBytes);
+        if (ok) {
+            *outputYBytesUsed  = hap_bc4_plane_bytes(width, height);
+            *outputCbBytesUsed = hap_bc4_plane_bytes(cb_w, cb_h);
+            *outputCrBytesUsed = hap_bc4_plane_bytes(cb_w, cb_h);
+            return HapResult_No_Error;
+        }
+    }
+#endif
+
 #ifdef HAVE_CUDA
     if (hap_cuda_available()) {
         unsigned int cb_w, cb_h;
@@ -727,6 +750,19 @@ unsigned int HapConvertTextureYCbCrToRGB(
     if (outputTextureFormat != HapTextureFormat_RGB_DXT1 &&
         outputTextureFormat != HapTextureFormat_RGBA_DXT5)
         return HapResult_Bad_Arguments;
+
+#ifdef HAVE_WEBGPU
+    if (hap_wgpu_available()) {
+        int ok = hap_wgpu_convert_ycbcr_to_rgb(
+            inputY, inputYBytes, inputCb, inputCbBytes, inputCr, inputCrBytes,
+            subsampling, width, height, outputTextureFormat,
+            outputBuffer, outputBufferBytes);
+        if (ok) {
+            *outputBufferBytesUsed = hap_bc_plane_bytes(width, height, outputTextureFormat);
+            return HapResult_No_Error;
+        }
+    }
+#endif
 
 #ifdef HAVE_CUDA
     if (hap_cuda_available()) {
